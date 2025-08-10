@@ -1,0 +1,11 @@
+name: bda-env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy
+  - matplotlib
+  - astropy
+  - dask
+  - pip
