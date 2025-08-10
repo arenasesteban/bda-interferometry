@@ -1,25 +1,45 @@
 # bda-interferometry
 
-## Estándar de Commits
+## Instalación
 
-### 1. Descripción
-Este proyecto sigue una convención simple para los mensajes de commit, diseñada para mantener claridad y consistencia en el historial de cambios.
+### Prerequisitos
 
----
+- **Python**: 3.10 o superior.
+- **Micromamba**: Gestor de entornos virtuales y dependencias.
 
-### 2. Estructura de un commit
+### Pasos de instalación
 
+1. Clonar repositorio:
 ```bash
-# ACTION: message
-ADD: script to generate simulated dataset.
+git clone https://github.com/arenasesteban/bda-interferometry.git
+cd bda-interferometry
 ```
 
-- **ACTION** → Palabra clave en mayúsculas que describe el tipo de cambio.
-- **message** → Descripción breve y clara en inglés, en tiempo presente.
+2. Crear un entorno virtual:
+```bash
+micromamba create -n bda-env
+micromamba activate bda-env
+```
 
----
+3. Instalar Pyralysis:
+```bash
+cd ..
+git clone https://gitlab.com/clirai/pyralysis.git
+cd pyralysis
+pip install --extra-index-url https://artefact.skao.int/repository/pypi-internal/simple -e .
+```
 
-### 3. Tabla de acciones
+## Estándar de Commits
+
+```bash
+# [ACTION]: [message]
+git commit -m "ADD: script to generate simulated dataset."
+```
+
+- **ACTION**: Una de las siguientes acciones, en mayúsculas.
+- **message**: Una breve descripción del cambio realizado.
+
+Este proyecto sigue una convención simple para los mensajes de commit, diseñada para mantener claridad y consistencia en el historial de cambios.
 
 | Acción  | Uso recomendado |
 |---------|-----------------|
