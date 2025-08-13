@@ -17,7 +17,7 @@ cd bda-interferometry
 
 2. Crear un entorno virtual:
 ```bash
-micromamba create -n bda-env
+micromamba env create -f environment.yml
 micromamba activate bda-env
 ```
 
@@ -31,23 +31,23 @@ pip install --extra-index-url https://artefact.skao.int/repository/pypi-internal
 
 ## Estándar de Commits
 
+Este proyecto sigue una convención simple para los mensajes de commit, diseñada para mantener claridad y consistencia en el historial de cambios.
+
 ```bash
-# [ACTION]: [message]
+# [ACCIÓN]: [mensaje]
 git commit -m "ADD: script to generate simulated dataset."
 ```
 
-- **ACTION**: Una de las siguientes acciones, en mayúsculas.
-- **message**: Una breve descripción del cambio realizado.
+- **ACCIÓN**: Una de las siguientes acciones, en mayúsculas.
+- **mensaje**: Descripción breve y clara del cambio realizado.
 
-Este proyecto sigue una convención simple para los mensajes de commit, diseñada para mantener claridad y consistencia en el historial de cambios.
-
-| Acción  | Uso recomendado |
-|---------|-----------------|
-| **ADD** | Añadir código, archivos, funciones, endpoints, tests o cualquier recurso nuevo. |
-| **CHG** | Cambiar o mejorar código existente que no soluciona un bug. |
-| **FIX** | Corregir errores, bugs o fallos detectados. |
-| **MERGE** | Integrar cambios de otra rama o resolver conflictos de merge. |
-| **DEL** | Eliminar código, archivos o funcionalidades que ya no se usan. |
-| **DOC** | Cambios exclusivamente en documentación. |
-| **TEST** | Cambios exclusivamente en pruebas unitarias o de integración. |
-| **CONF** | Cambios en archivos de configuración, scripts de despliegue o entornos. |
+| Acción | Uso recomendado |
+|:-------|:---------------|
+| ADD | Añadir código, archivos, funciones, endpoints, tests o cualquier recurso nuevo. |
+| CHG | Cambiar o mejorar código existente que no soluciona un bug. |
+| FIX | Corregir errores, bugs o fallos detectados. |
+| MERGE | Integrar cambios de otra rama o resolver conflictos de merge. |
+| DEL | Eliminar código, archivos o funcionalidades que ya no se usan. |
+| DOC | Cambios exclusivamente en documentación. |
+| TEST | Cambios exclusivamente en pruebas unitarias o de integración. |
+| CONF | Cambios en archivos de configuración, scripts de despliegue o entornos. |
