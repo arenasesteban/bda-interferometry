@@ -10,3 +10,5 @@ dependencies:
   - dask
   - ipykernel
   - pip
+  - pip:
+    - python-casacore
