@@ -12,3 +12,5 @@ dependencies:
   - pip
   - pip:
     - python-casacore
+    - kafka-python
+    - msgpack
