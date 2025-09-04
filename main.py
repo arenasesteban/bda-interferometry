@@ -1,14 +1,14 @@
 """
-Main script for BDA Interferometry Dataset Generation
+Main Entry Point - BDA Interferometry Dataset Generation
 
-Simple script that creates and executes a DatasetGenerator
-based on the notebook implementation.
+Primary script for generating simulated radio interferometry datasets using
+the Pyralysis framework. Provides a simple command-line interface for
+creating test datasets with predefined observation parameters.
 
-Author: Pipeline Team
-Date: 2025
+This script serves as the main entry point for dataset generation and can be
+used for testing the complete simulation pipeline before streaming operations.
 """
 
-import os
 import sys
 from pathlib import Path
 
@@ -17,70 +17,66 @@ project_root = Path(__file__).parent
 src_path = project_root / "src"
 sys.path.append(str(src_path))
 
-from pipeline.dataset_generator import DatasetGenerator
+from data.simulation import generate_dataset
 
 
 def main():
-    """Main function to generate interferometry dataset."""
+    """
+    Generate a standard interferometry dataset for testing.
     
-    print("BDA Interferometry Dataset Generation")
-    print("=" * 50)
+    Creates a simulated radio interferometry dataset using predefined
+    observation parameters suitable for development and testing of the
+    streaming pipeline infrastructure.
     
-    # Configuration paths
+    Returns
+    -------
+    object or bool
+        Generated Pyralysis dataset object if successful, False if failed
+        
+    Raises
+    ------
+    SystemExit
+        If antenna configuration file is not found
+    """
+    
     antenna_config_path = "./antenna_configs/alma.cycle10.1.cfg"
     
-    # Check if antenna config exists
     if not Path(antenna_config_path).exists():
-        print(f"Error: Antenna configuration file not found: {antenna_config_path}")
+        print(f"Antenna configuration file not found: {antenna_config_path}")
         return False
-    
-    print(f"Using antenna configuration: {antenna_config_path}")
-    
-    # Create DatasetGenerator instance
-    generator = DatasetGenerator(antenna_config_path=antenna_config_path)
-    
-    # Generate dataset with configuration
-    print("Generating dataset...")
-    dataset = generator.generate_dataset(
-        # Frequency configuration
-        freq_start=35.0,           # GHz - ALMA Band 1 start
-        freq_end=50.0,             # GHz - ALMA Band 1 end
-        n_frequencies=50,          # Number of frequency channels
+
+    try:
+        dataset = generate_dataset(
+            antenna_config_path=antenna_config_path,
+            freq_start=35.0,
+            freq_end=50.0,
+            n_frequencies=50,
+            date_string="2002-05-10",
+            observation_time="4h",
+            declination="-45d00m00s",
+            integration_time=180.0,
+            n_point_sources=15,
+            point_flux_density=1.0,
+            point_spectral_index=3.0,
+            include_gaussian=True,
+            gaussian_flux_density=10.0,
+            gaussian_position=(0, 0),
+            gaussian_minor_radius=20.0,
+            gaussian_major_radius=30.0,
+            gaussian_theta_angle=60.0
+        )
         
-        # Observation configuration
-        date_string="2002-05-10",  # Observation date
-        observation_time="4h",     # Total observation time
-        declination="-45d00m00s",  # Declination angle
-        integration_time=180.0,    # Integration time in seconds
+        return dataset
         
-        # Point sources configuration
-        n_point_sources=15,        # Number of point sources
-        point_flux_density=1.0,    # Flux density in mJy
-        point_spectral_index=3.0,  # Spectral index
-        
-        # Gaussian source configuration
-        include_gaussian=True,     # Include Gaussian source
-        gaussian_flux_density=10.0,   # Flux density in Jy
-        gaussian_position=(0, 0),     # Position (l, m)
-        gaussian_minor_radius=20.0,   # Minor radius in arcsec
-        gaussian_major_radius=30.0,   # Major radius in arcsec
-        gaussian_theta_angle=60.0     # Position angle in degrees
-    )
-    
-    print("Dataset generation completed successfully!")
-    print(f"Generated {len(dataset.ms_list)} MS file(s)")
-    
-    return dataset
+    except Exception as e:
+        print(f"Dataset generation failed: {e}")
+        return False
 
 
 if __name__ == "__main__":
-    try:
-        dataset = main()
-        if dataset:
-            print("✅ Success: Dataset ready for processing")
-        else:
-            print("❌ Error: Dataset generation failed")
-            sys.exit(1)
-    except Exception as e:
-        print(f"❌ Error: {e}")
+    result = main()
+    if result:
+        print("Dataset generation successful")
+    else:
+        print("Dataset generation failed")
         sys.exit(1)
