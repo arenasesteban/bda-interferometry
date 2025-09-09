@@ -14,7 +14,6 @@ extraction : Visibility data extraction and chunking utilities for streaming
 # Simulation functions
 from .simulation import (
     generate_dataset,
-    create_standard_dataset,
     load_antenna_configuration,
     configure_observation,
     simulate_dataset
@@ -28,7 +27,6 @@ from .extraction import (
 __all__ = [
     # Simulation functions
     'generate_dataset',
-    'create_standard_dataset', 
     'load_antenna_configuration',
     'configure_observation',
     'simulate_dataset',
