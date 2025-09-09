@@ -6,6 +6,7 @@
 
 - **Python**: 3.10 o superior.
 - **Micromamba**: Gestor de entornos virtuales y dependencias.
+- **Docker**: Ejecución de contenedores.
 
 ### Pasos de instalación
 
@@ -27,6 +28,23 @@ cd ..
 git clone https://gitlab.com/clirai/pyralysis.git
 cd pyralysis
 pip install --extra-index-url https://artefact.skao.int/repository/pypi-internal/simple -e .
+```
+
+### Ejecución de simulación
+
+1. Iniciar Docker:
+```bash
+docker-compose up -d
+```
+
+2. Ejecutar el script de transmisión:
+```bash
+python services/producer_service.py
+```
+
+3. Ejecutar el script de consumo:
+```bash
+python services/consumer_service.py
 ```
 
 ## Estándar de Commits
