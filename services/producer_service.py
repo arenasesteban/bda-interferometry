@@ -7,6 +7,24 @@ chunks via Kafka using functional programming and lossless compression.
 
 This service creates simulated interferometry datasets and streams them
 as compressed chunks to Kafka topics for real-time data transmission.
+
+Usage:
+    python producer_service.py <antenna_config_file> [--simulation-config <config.json>] [--topic <topic_name>]
+
+Examples:
+    # Basic usage with default simulation parameters
+    python producer_service.py ./antenna_configs/alma.cycle10.1.cfg
+    
+    # With custom simulation configuration
+    python producer_service.py ./antenna_configs/alma.cycle10.1.cfg --simulation-config my_config.json
+    
+    # With custom topic
+    python producer_service.py ./antenna_configs/alma.cycle10.1.cfg --topic my-visibility-stream
+
+Configuration:
+    - Kafka servers: Fixed to localhost:9092 (modify DEFAULT_KAFKA_SERVERS constant if needed)
+    - Default topic: 'visibility-stream' (can be overridden with --topic)
+    - Simulation parameters: Configurable via JSON file or uses sensible defaults
 """
 
 import sys
@@ -14,6 +32,7 @@ import os
 import msgpack
 import numpy as np
 import zlib
+import json
 from pathlib import Path
 import argparse
 from typing import Dict, Any
@@ -22,6 +41,10 @@ from typing import Dict, Any
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
 
+# Configuration constants
+DEFAULT_KAFKA_SERVERS = ['localhost:9092']
+DEFAULT_TOPIC = 'visibility-stream'
+
 # Add src directory to path
 project_root = Path(__file__).parent.parent
 src_path = project_root / "src"
@@ -29,6 +52,53 @@ sys.path.append(str(src_path))
 
 from data.simulation import generate_dataset
 from data.extraction import stream_subms_chunks
+
+
+def load_simulation_config(config_path: str = None) -> Dict[str, Any]:
+    """
+    Load simulation configuration from JSON file or return defaults.
+    
+    Parameters
+    ----------
+    config_path : str, optional
+        Path to JSON configuration file. If None, returns default configuration.
+        
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary containing simulation parameters
+    """
+    
+    default_config = {
+        "freq_start": 35.0,
+        "freq_end": 50.0,
+        "n_frequencies": 50,
+        "date_string": "2002-05-10",
+        "observation_time": "1h",
+        "declination": "-45d00m00s",
+        "integration_time": 180.0,
+        "n_point_sources": 15,
+        "point_flux_density": 1.0,
+        "point_spectral_index": 3.0,
+        "include_gaussian": True,
+        "gaussian_flux_density": 10.0,
+        "gaussian_position": [0, 0],
+        "gaussian_minor_radius": 20.0,
+        "gaussian_major_radius": 30.0,
+        "gaussian_theta_angle": 60.0
+    }
+    
+    if config_path and Path(config_path).exists():
+        try:
+            with open(config_path, 'r') as f:
+                user_config = json.load(f)
+            # Merge user config with defaults
+            default_config.update(user_config)
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Warning: Could not load config file {config_path}: {e}")
+            print("Using default configuration.")
+    
+    return default_config
 
 
 def serialize_chunk(chunk: Dict[str, Any]) -> bytes:
@@ -79,7 +149,7 @@ def serialize_chunk(chunk: Dict[str, Any]) -> bytes:
     return msgpack.packb(msgpack_chunk, use_bin_type=True, strict_types=False)
 
 
-def create_kafka_producer(kafka_servers=['localhost:9092']):
+def create_kafka_producer(kafka_servers=None):
     """
     Create Kafka producer with optimized configuration for large messages.
     
@@ -91,13 +161,16 @@ def create_kafka_producer(kafka_servers=['localhost:9092']):
     Parameters
     ----------
     kafka_servers : list of str, optional
-        List of Kafka server addresses (default: ['localhost:9092'])
+        List of Kafka server addresses. If None, uses default servers.
         
     Returns
     -------
     KafkaProducer
         Configured producer for large message transmission
     """
+    
+    if kafka_servers is None:
+        kafka_servers = DEFAULT_KAFKA_SERVERS
     
     return KafkaProducer(
         bootstrap_servers=kafka_servers,
@@ -163,8 +236,8 @@ def stream_chunks_to_kafka(dataset, producer, topic: str) -> int:
 
 
 def run_producer_service(antenna_config_path: str, 
-                        kafka_servers=['localhost:9092'], 
-                        topic='visibility-stream') -> Dict[str, Any]:
+                        simulation_config_path: str = None,
+                        topic: str = None) -> Dict[str, Any]:
     """
     Execute complete production service.
     
@@ -175,10 +248,10 @@ def run_producer_service(antenna_config_path: str,
     ----------
     antenna_config_path : str
         Path to antenna configuration file
-    kafka_servers : list of str, optional
-        List of Kafka server addresses (default: ['localhost:9092'])
+    simulation_config_path : str, optional
+        Path to simulation configuration JSON file. If None, uses defaults.
     topic : str, optional
-        Kafka topic for visibility streaming (default: 'visibility-stream')
+        Kafka topic for visibility streaming. If None, uses default topic.
         
     Returns
     -------
@@ -188,30 +261,36 @@ def run_producer_service(antenna_config_path: str,
     
     producer = None
     
+    if topic is None:
+        topic = DEFAULT_TOPIC
+    
     try:
-        # Generate dataset
+        # Load simulation configuration
+        sim_config = load_simulation_config(simulation_config_path)
+        
+        # Generate dataset with loaded configuration
         dataset = generate_dataset(
             antenna_config_path=antenna_config_path,
-            freq_start=35.0,
-            freq_end=50.0,
-            n_frequencies=50,
-            date_string="2002-05-10",
-            observation_time="1h",
-            declination="-45d00m00s",
-            integration_time=180.0,
-            n_point_sources=15,
-            point_flux_density=1.0,
-            point_spectral_index=3.0,
-            include_gaussian=True,
-            gaussian_flux_density=10.0,
-            gaussian_position=(0, 0),
-            gaussian_minor_radius=20.0,
-            gaussian_major_radius=30.0,
-            gaussian_theta_angle=60.0
+            freq_start=sim_config["freq_start"],
+            freq_end=sim_config["freq_end"],
+            n_frequencies=sim_config["n_frequencies"],
+            date_string=sim_config["date_string"],
+            observation_time=sim_config["observation_time"],
+            declination=sim_config["declination"],
+            integration_time=sim_config["integration_time"],
+            n_point_sources=sim_config["n_point_sources"],
+            point_flux_density=sim_config["point_flux_density"],
+            point_spectral_index=sim_config["point_spectral_index"],
+            include_gaussian=sim_config["include_gaussian"],
+            gaussian_flux_density=sim_config["gaussian_flux_density"],
+            gaussian_position=tuple(sim_config["gaussian_position"]),
+            gaussian_minor_radius=sim_config["gaussian_minor_radius"],
+            gaussian_major_radius=sim_config["gaussian_major_radius"],
+            gaussian_theta_angle=sim_config["gaussian_theta_angle"]
         )
 
         # Create producer and stream chunks
-        producer = create_kafka_producer(kafka_servers)
+        producer = create_kafka_producer()
         chunks_sent = stream_chunks_to_kafka(dataset, producer, topic)
         
         return {
@@ -238,32 +317,32 @@ def main():
     parser = argparse.ArgumentParser(description="BDA Interferometry Producer Service")
     
     parser.add_argument(
-        "--antenna-config", 
-        default="./antenna_configs/alma.cycle10.1.cfg",
-        help="Path to antenna configuration file"
+        "antenna_config", 
+        help="Path to antenna configuration file (required)"
     )
     parser.add_argument(
-        "--kafka-servers", 
-        default="localhost:9092",
-        help="Kafka servers (comma-separated)"
+        "--simulation-config", 
+        help="Path to simulation configuration JSON file (optional, uses defaults if not provided)"
     )
     parser.add_argument(
         "--topic", 
-        default="visibility-stream",
-        help="Kafka topic for visibility streaming"
+        help=f"Kafka topic for visibility streaming (default: {DEFAULT_TOPIC})"
     )
     
     args = parser.parse_args()
     
-    # Parse Kafka servers
-    kafka_servers = [s.strip() for s in args.kafka_servers.split(',')]
-    
     # Execute service
     result = run_producer_service(
         antenna_config_path=args.antenna_config,
-        kafka_servers=kafka_servers,
+        simulation_config_path=args.simulation_config,
         topic=args.topic
     )
+    
+    # Print result summary
+    if result['success']:
+        print(f"✓ Successfully sent {result['chunks_sent']} chunks to Kafka")
+    else:
+        print(f"✗ Error: {result['error']}")
     
     # Exit based on result
     sys.exit(0 if result['success'] else 1)
