@@ -7,24 +7,6 @@ chunks via Kafka using functional programming and lossless compression.
 
 This service creates simulated interferometry datasets and streams them
 as compressed chunks to Kafka topics for real-time data transmission.
-
-Usage:
-    python producer_service.py <antenna_config_file> [--simulation-config <config.json>] [--topic <topic_name>]
-
-Examples:
-    # Basic usage with default simulation parameters
-    python producer_service.py ./antenna_configs/alma.cycle10.1.cfg
-    
-    # With custom simulation configuration
-    python producer_service.py ./antenna_configs/alma.cycle10.1.cfg --simulation-config my_config.json
-    
-    # With custom topic
-    python producer_service.py ./antenna_configs/alma.cycle10.1.cfg --topic my-visibility-stream
-
-Configuration:
-    - Kafka servers: Fixed to localhost:9092 (modify DEFAULT_KAFKA_SERVERS constant if needed)
-    - Default topic: 'visibility-stream' (can be overridden with --topic)
-    - Simulation parameters: Configurable via JSON file or uses sensible defaults
 """
 
 import sys
@@ -33,6 +15,7 @@ import msgpack
 import numpy as np
 import zlib
 import json
+import time
 from pathlib import Path
 import argparse
 from typing import Dict, Any
@@ -218,13 +201,15 @@ def stream_chunks_to_kafka(dataset, producer, topic: str, streaming_delay: float
     
     try:
         for chunk in stream_subms_chunks(dataset):
-            # Create baseline-aware key for optimal BDA partitioning
-            key = create_baseline_key(chunk)
+            key = f"{chunk['subms_id']}_{chunk['chunk_id']}"
             
             try:
                 future = producer.send(topic, value=chunk, key=key)
                 future.get(timeout=30)
                 chunks_sent += 1
+                
+                # Simulate streaming delay
+                time.sleep(streaming_delay)
                     
             except KafkaError:
                 continue
@@ -312,49 +297,6 @@ def run_producer_service(antenna_config_path: str,
         if producer:
             producer.flush()
             producer.close()
-
-
-def create_baseline_key(chunk: Dict[str, Any]) -> str:
-    """
-    Create baseline-aware partitioning key for Kafka.
-    
-    Creates a key based on the baseline (antenna1, antenna2) and observation
-    parameters to ensure related chunks are processed together in windowed
-    streaming.
-    
-    Parameters
-    ----------
-    chunk : Dict[str, Any]
-        Chunk containing antenna and metadata information
-        
-    Returns
-    -------
-    str
-        Baseline-aware partitioning key in format: "ant1-ant2-subms_id"
-    """
-    # Extract antenna baseline info
-    antenna1 = chunk.get('antenna1')
-    antenna2 = chunk.get('antenna2')
-    
-    # For arrays, take the first element (assuming consistent baseline per chunk)
-    if hasattr(antenna1, '__iter__') and len(antenna1) > 0:
-        ant1 = int(antenna1[0])
-    else:
-        ant1 = int(antenna1) if antenna1 is not None else 0
-        
-    if hasattr(antenna2, '__iter__') and len(antenna2) > 0:
-        ant2 = int(antenna2[0])
-    else:
-        ant2 = int(antenna2) if antenna2 is not None else 0
-    
-    # Ensure consistent baseline ordering (smaller antenna first)
-    min_ant = min(ant1, ant2)
-    max_ant = max(ant1, ant2)
-    
-    # Create baseline-aware key
-    subms_id = chunk.get('subms_id', 0)
-    
-    return f"{min_ant}-{max_ant}-{subms_id}"
 
 
 def main():
