@@ -7,16 +7,6 @@ Deserializes chunks and provides basic distributed processing with console outpu
 
 This service replaces the traditional Kafka consumer with Spark streaming capabilities
 for distributed processing of large-scale interferometry datasets.
-
-Usage:
-    python spark_consumer_service.py [--kafka-servers SERVERS] [--topic TOPIC]
-
-Examples:
-    # Basic usage
-    python spark_consumer_service.py
-    
-    # Custom Kafka configuration
-    python spark_consumer_service.py --kafka-servers localhost:9092 --topic my-stream
 """
 
 import sys
