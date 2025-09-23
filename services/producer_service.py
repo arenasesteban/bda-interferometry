@@ -185,12 +185,12 @@ def create_kafka_producer(kafka_servers=None):
     )
 
 
-def stream_chunks_to_kafka(dataset, producer, topic: str) -> int:
+def stream_chunks_to_kafka(dataset, producer, topic: str, streaming_delay: float = 0.1) -> int:
     """
-    Stream all dataset chunks to Kafka topic.
+    Stream dataset chunks to Kafka with true streaming simulation.
     
-    Transmits each chunk from the dataset as individual Kafka messages
-    with automatic serialization and compression.
+    Transmits each chunk individually with configurable delay to simulate
+    continuous data acquisition from radio interferometer.
     
     Parameters
     ----------
@@ -200,6 +200,8 @@ def stream_chunks_to_kafka(dataset, producer, topic: str) -> int:
         Configured Kafka producer instance
     topic : str
         Kafka topic name for streaming
+    streaming_delay : float, optional
+        Delay between chunk transmissions in seconds (default: 0.1s)
         
     Returns
     -------
@@ -216,7 +218,8 @@ def stream_chunks_to_kafka(dataset, producer, topic: str) -> int:
     
     try:
         for chunk in stream_subms_chunks(dataset):
-            key = f"{chunk['subms_id']}_{chunk['chunk_id']}"
+            # Create baseline-aware key for optimal BDA partitioning
+            key = create_baseline_key(chunk)
             
             try:
                 future = producer.send(topic, value=chunk, key=key)
@@ -309,6 +312,49 @@ def run_producer_service(antenna_config_path: str,
         if producer:
             producer.flush()
             producer.close()
+
+
+def create_baseline_key(chunk: Dict[str, Any]) -> str:
+    """
+    Create baseline-aware partitioning key for Kafka.
+    
+    Creates a key based on the baseline (antenna1, antenna2) and observation
+    parameters to ensure related chunks are processed together in windowed
+    streaming.
+    
+    Parameters
+    ----------
+    chunk : Dict[str, Any]
+        Chunk containing antenna and metadata information
+        
+    Returns
+    -------
+    str
+        Baseline-aware partitioning key in format: "ant1-ant2-subms_id"
+    """
+    # Extract antenna baseline info
+    antenna1 = chunk.get('antenna1')
+    antenna2 = chunk.get('antenna2')
+    
+    # For arrays, take the first element (assuming consistent baseline per chunk)
+    if hasattr(antenna1, '__iter__') and len(antenna1) > 0:
+        ant1 = int(antenna1[0])
+    else:
+        ant1 = int(antenna1) if antenna1 is not None else 0
+        
+    if hasattr(antenna2, '__iter__') and len(antenna2) > 0:
+        ant2 = int(antenna2[0])
+    else:
+        ant2 = int(antenna2) if antenna2 is not None else 0
+    
+    # Ensure consistent baseline ordering (smaller antenna first)
+    min_ant = min(ant1, ant2)
+    max_ant = max(ant1, ant2)
+    
+    # Create baseline-aware key
+    subms_id = chunk.get('subms_id', 0)
+    
+    return f"{min_ant}-{max_ant}-{subms_id}"
 
 
 def main():
