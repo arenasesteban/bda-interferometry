@@ -1,10 +1,7 @@
-#!/bin/bash
-#
 # Basic Producer Execution Script
-#
+
 # Executes the producer service with default simulation parameters
 # using the ALMA antenna configuration.
-#
 
 # Configuration paths
 ANTENNA_CONFIG="./antenna_configs/alma.cycle10.1.cfg"

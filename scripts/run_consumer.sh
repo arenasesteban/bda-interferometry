@@ -1,5 +1,3 @@
-#!/bin/bash
-
 # Simple Spark Consumer Launcher for BDA Interferometry
 # Launches Spark consumer to receive visibility data from Kafka
 
@@ -42,6 +40,6 @@ echo "Kafka: $KAFKA_SERVERS | Topic: $TOPIC"
 echo "Press Ctrl+C to stop"
 
 cd "$PROJECT_ROOT"
-python services/spark_consumer_service.py \
+python services/consumer_service.py \
     --kafka-servers "$KAFKA_SERVERS" \
     --topic "$TOPIC"
