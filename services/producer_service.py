@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Producer Service - Interferometry Data Streaming Microservice
 
