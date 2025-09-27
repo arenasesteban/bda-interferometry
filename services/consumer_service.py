@@ -12,14 +12,27 @@ import sys
 import argparse
 from pathlib import Path
 from typing import Dict, Any
+import time
+from datetime import datetime, timedelta
+import msgpack
+import numpy as np
+import zlib
+import json
+import random
+
+from pyspark.sql.functions import spark_partition_id
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import udf
+from pyspark.sql.types import StringType
+from kafka.admin import KafkaAdminClient, NewTopic
+from kafka.errors import TopicAlreadyExistsError
 
 # Add src directory to path
 project_root = Path(__file__).parent.parent
 src_path = project_root / "src"
 sys.path.append(str(src_path))
 
-from processing.spark_session import create_spark_session, load_config, get_kafka_options
-from processing.basic_analytics import ChunkAnalyzer, format_chunk_summary
+from processing.spark_session import create_spark_session
 
 
 def ensure_kafka_topic_exists(kafka_servers: str, topic: str, num_partitions: int = 4, max_retries: int = 30) -> bool:
@@ -47,12 +60,8 @@ def ensure_kafka_topic_exists(kafka_servers: str, topic: str, num_partitions: in
     bool
         True if topic exists or was created successfully
     """
-    import time
     
     try:
-        from kafka.admin import KafkaAdminClient, NewTopic
-        from kafka.errors import TopicAlreadyExistsError
-        
         # Create admin client with longer timeout
         admin_client = KafkaAdminClient(
             bootstrap_servers=kafka_servers.split(','),
@@ -126,14 +135,10 @@ def wait_for_kafka_ready(kafka_servers: str, timeout: int = 60) -> bool:
     bool
         True if Kafka is ready
     """
-    import time
-    from datetime import datetime, timedelta
     
     print(f"🔍 Checking Kafka connectivity to {kafka_servers}...")
     
-    try:
-        from kafka.admin import KafkaAdminClient
-        
+    try:        
         end_time = datetime.now() + timedelta(seconds=timeout)
         
         while datetime.now() < end_time:
@@ -181,9 +186,6 @@ def deserialize_chunk_data(raw_data_bytes: bytes) -> dict:
     dict
         Deserialized chunk with numpy arrays reconstructed
     """
-    import msgpack
-    import numpy as np
-    import zlib
     
     try:
         # Deserialize MessagePack
@@ -231,8 +233,7 @@ def decompose_chunk_to_rows(chunk: dict) -> list:
     list
         Lista de filas individuales con baseline_key y metadata
     """
-    import numpy as np
-    
+
     rows = []
     
     try:
@@ -367,12 +368,6 @@ def deserialize_chunk_udf():
     function
         Spark UDF for chunk deserialization
     """
-    import msgpack
-    import numpy as np
-    import zlib
-    import json
-    from pyspark.sql.functions import udf
-    from pyspark.sql.types import StringType
     
     def deserialize_chunk_data(raw_data_bytes):
         """
@@ -419,10 +414,6 @@ def process_streaming_batch(df, epoch_id):
     """
     Process streaming batch para FASE 2: Descomposición y Agrupación BDA - VERSIÓN CONCISA.
     """
-    import time
-    from datetime import datetime
-    from pyspark.sql.functions import spark_partition_id
-    from pyspark.sql import SparkSession
     
     current_time = datetime.now().strftime("%H:%M:%S")
     start_time = time.time()
@@ -505,8 +496,6 @@ def simulate_distributed_processing(chunk_metadata: dict, partition_id: int) -> 
     float
         Simulated processing time in milliseconds
     """
-    import time
-    import random
     
     # Simulate work based on data size and partition
     data_points = 1
@@ -533,7 +522,6 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
     """
     Run the Spark streaming consumer with enhanced debugging and real-time feedback.
     """
-    from datetime import datetime
     
     start_time = datetime.now().strftime("%H:%M:%S")
     
@@ -566,7 +554,6 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
     
     # Add a small delay to ensure topic propagation
     print("⏳ Allowing time for topic propagation...")
-    import time
     time.sleep(2)
     
     # Create Spark session
