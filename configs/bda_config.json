@@ -1,0 +1,7 @@
+{
+  "decorr_factor": 0.95,
+  "frequency_hz": 42500000000.0,
+  "declination_deg": -45.0,
+  "safety_factor": 0.8,
+  "description": "BDA configuration for ALMA Band 1 observations"
+}
