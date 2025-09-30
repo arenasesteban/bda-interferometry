@@ -11,7 +11,6 @@ for distributed processing of large-scale interferometry datasets.
 import sys
 import argparse
 from pathlib import Path
-from typing import Dict, Any
 import time
 from datetime import datetime, timedelta
 import msgpack
@@ -20,7 +19,6 @@ import zlib
 import json
 import random
 
-from pyspark.sql.functions import spark_partition_id
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import udf
 from pyspark.sql.types import StringType
@@ -33,6 +31,8 @@ src_path = project_root / "src"
 sys.path.append(str(src_path))
 
 from processing.spark_session import create_spark_session
+from bda.bda_processor import process_microbatch_with_bda, format_bda_result_for_output, create_bda_summary_stats
+from bda.bda_config import load_bda_config_with_fallback, get_default_bda_config
 
 
 def ensure_kafka_topic_exists(kafka_servers: str, topic: str, num_partitions: int = 4, max_retries: int = 30) -> bool:
@@ -266,8 +266,8 @@ def decompose_chunk_to_rows(chunk: dict) -> list:
             ant2 = int(antenna2[row_idx]) if len(antenna2) > row_idx else -1
             scan_num = int(scan_number[row_idx]) if len(scan_number) > row_idx else -1
             
-            # Crear baseline_key único
-            baseline_key = f"{ant1}-{ant2}-{subms_id}"
+            # Crear baseline_key normalizado
+            baseline_key = normalize_baseline_key(ant1, ant2, subms_id)
             
             # Crear registro de fila individual
             row_record = {
@@ -284,10 +284,10 @@ def decompose_chunk_to_rows(chunk: dict) -> list:
                 'v': float(v_array[row_idx]) if len(v_array) > row_idx else 0.0,
                 'w': float(w_array[row_idx]) if len(w_array) > row_idx else 0.0,
                 
-                # Datos científicos para BDA (por ahora solo metadatos de forma)
-                'vis_shape': list(visibilities[row_idx].shape) if len(visibilities) > row_idx else [],
-                'weight_shape': list(weight[row_idx].shape) if len(weight) > row_idx else [],
-                'flag_shape': list(flag[row_idx].shape) if len(flag) > row_idx else [],
+                # Datos científicos reales para BDA
+                'visibility': visibilities[row_idx] if len(visibilities) > row_idx else np.array([]),
+                'weight': weight[row_idx] if len(weight) > row_idx else np.array([]),
+                'flag': flag[row_idx] if len(flag) > row_idx else np.array([]),
                 
                 # Metadata original del chunk
                 'original_chunk_id': chunk.get('chunk_id', -1),
@@ -324,8 +324,16 @@ def group_rows_by_baseline_scan(rows: list) -> dict:
         baseline_key = row.get('baseline_key', 'unknown')
         scan_number = row.get('scan_number', -1)
         
-        # Crear group key
-        group_key = f"{baseline_key}_scan{scan_number}"
+        # Crear group key usando función consistente
+        # Extraer antenna1, antenna2 del baseline_key si es posible
+        if 'antenna1' in row and 'antenna2' in row:
+            ant1 = row['antenna1']
+            ant2 = row['antenna2']
+            subms_id = row.get('subms_id', None)
+            group_key = create_group_key(ant1, ant2, scan_number, subms_id)
+        else:
+            # Fallback al método anterior
+            group_key = f"{baseline_key}_scan{scan_number}"
         
         if group_key not in groups:
             groups[group_key] = []
@@ -463,6 +471,47 @@ def process_streaming_batch(df, epoch_id):
                 print(f"❌ Chunk error: {e}")
                 continue
         
+        # APLICAR BDA A LOS GRUPOS
+        if all_groups:
+            print("\n🔬 Applying BDA to groups...")
+            
+            try:
+                # Cargar configuración BDA
+                config_path = str(project_root / "configs" / "bda_config.json")
+                bda_config = load_bda_config_with_fallback(config_path)
+                
+                # Convertir grupos a lista de filas para BDA
+                all_rows = []
+                for group_rows in all_groups.values():
+                    all_rows.extend(group_rows)
+                
+                # Aplicar BDA
+                bda_results = process_microbatch_with_bda(all_rows, bda_config)
+                
+                # Crear estadísticas resumen
+                bda_stats = create_bda_summary_stats(bda_results)
+                
+                # Logging de resultados BDA
+                print(f"🎯 BDA Results:")
+                print(f"   📊 Input rows: {bda_stats.get('total_input_rows', 0)}")
+                print(f"   📈 Output windows: {bda_stats.get('total_windows', 0)}")
+                print(f"   📉 Compression: {bda_stats.get('compression_ratio', 0):.2f}:1")
+                print(f"   ⏱️  Avg window duration: {bda_stats.get('avg_window_duration_s', 0):.2f}s")
+                
+                # Formatear algunos resultados para inspección
+                if bda_results:
+                    sample_results = bda_results[:3]  # Primeros 3 para inspección
+                    print("\n📋 Sample BDA Results:")
+                    for i, result in enumerate(sample_results):
+                        formatted = format_bda_result_for_output(result)
+                        print(f"   Window {i+1}: baseline({result['antenna1']}-{result['antenna2']}) "
+                              f"averaged {result['n_input_rows']} rows → "
+                              f"Δt={result['window_dt_s']:.2f}s")
+                
+            except Exception as e:
+                print(f"❌ BDA processing error: {e}")
+                # Continuar sin BDA si hay errores
+            
         # Resumen final del microbatch
         processing_time = (time.time() - start_time) * 1000
         print("-" * 50)
@@ -635,6 +684,60 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
         print("\n🔒 Shutting down Spark session...")
         spark.stop()
         print("✅ Consumer stopped successfully")
+
+
+def normalize_baseline_key(antenna1: int, antenna2: int, subms_id: str = None) -> str:
+    """
+    Normaliza la clave de baseline para consistencia entre consumer y BDA.
+    
+    Garantiza que (1,3) y (3,1) generen la misma clave, y opcionalmente
+    incluye subms_id para distinguir diferentes SubMS.
+    
+    Parameters
+    ----------
+    antenna1 : int
+        Primera antena del baseline
+    antenna2 : int
+        Segunda antena del baseline  
+    subms_id : str, optional
+        ID del SubMS para distinguir entre diferentes particiones
+        
+    Returns
+    -------
+    str
+        Clave normalizada del baseline
+    """
+    # Normalizar orden: siempre min-max
+    ant_min, ant_max = sorted([antenna1, antenna2])
+    
+    if subms_id:
+        return f"{ant_min}-{ant_max}-{subms_id}"
+    else:
+        return f"{ant_min}-{ant_max}"
+
+
+def create_group_key(antenna1: int, antenna2: int, scan_number: int, subms_id: str = None) -> str:
+    """
+    Crea clave de grupo consistente para (baseline, scan_number).
+    
+    Parameters
+    ----------
+    antenna1 : int
+        Primera antena
+    antenna2 : int
+        Segunda antena
+    scan_number : int
+        Número de scan
+    subms_id : str, optional
+        ID del SubMS
+        
+    Returns
+    -------
+    str
+        Clave de grupo normalizada
+    """
+    baseline_key = normalize_baseline_key(antenna1, antenna2, subms_id)
+    return f"{baseline_key}_scan{scan_number}"
 
 
 def main():
