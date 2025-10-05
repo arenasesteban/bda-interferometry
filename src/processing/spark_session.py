@@ -11,6 +11,10 @@ from typing import Dict, Any
 
 import findspark
 from pyspark.sql import SparkSession
+from pyspark.sql.types import (
+    StructType, StructField, StringType, IntegerType, 
+    FloatType, ArrayType, BooleanType, LongType
+)
 
 
 def create_spark_session(config_path: str = None) -> SparkSession:
@@ -109,3 +113,96 @@ def get_kafka_options(config: Dict[str, Any]) -> Dict[str, str]:
         "subscribe": kafka_config["topic"],
         "startingOffsets": "latest"
     }
+
+
+def get_visibility_row_schema() -> StructType:
+    """
+    Define Spark schema for individual visibility rows after chunk expansion.
+    
+    This schema matches the structure created by decompose_chunk_to_rows()
+    to ensure compatibility with existing BDA processing.
+    
+    Returns
+    -------
+    StructType
+        Spark schema for visibility rows
+    """
+    return StructType([
+        # Grouping identifiers
+        StructField("baseline_key", StringType(), False),
+        StructField("scan_number", IntegerType(), False),
+        StructField("antenna1", IntegerType(), False),
+        StructField("antenna2", IntegerType(), False),
+        StructField("subms_id", StringType(), True),
+        
+        # Temporal and spatial metadata  
+        StructField("time", FloatType(), False),
+        StructField("u", FloatType(), False),
+        StructField("v", FloatType(), False),
+        StructField("w", FloatType(), False),
+        
+        # Scientific data arrays (as JSON strings for now, will be parsed in UDFs)
+        StructField("visibility_json", StringType(), False),
+        StructField("weight_json", StringType(), False),
+        StructField("flag_json", StringType(), False),
+        
+        # Original chunk metadata
+        StructField("original_chunk_id", IntegerType(), True),
+        StructField("row_index_in_chunk", IntegerType(), False),
+        StructField("field_id", IntegerType(), True),
+        StructField("spw_id", IntegerType(), True),
+    ])
+
+
+def get_grouped_visibility_schema() -> StructType:
+    """
+    Define Spark schema for grouped visibility data (baseline + scan).
+    
+    This schema is used after groupBy operations for BDA processing.
+    
+    Returns
+    -------
+    StructType
+        Spark schema for grouped visibility data
+    """
+    return StructType([
+        StructField("group_key", StringType(), False),
+        StructField("baseline_key", StringType(), False),
+        StructField("scan_number", IntegerType(), False),
+        StructField("antenna1", IntegerType(), False),
+        StructField("antenna2", IntegerType(), False),
+        StructField("row_count", IntegerType(), False),
+        StructField("visibility_rows", ArrayType(get_visibility_row_schema()), False),
+    ])
+
+
+def get_bda_result_schema() -> StructType:
+    """
+    Define Spark schema for BDA processing results.
+    
+    This schema matches the output structure from BDA algorithms
+    for consistent distributed processing.
+    
+    Returns
+    -------
+    StructType
+        Spark schema for BDA results
+    """
+    return StructType([
+        StructField("visibility_averaged_json", StringType(), False),
+        StructField("weight_total_json", StringType(), False),
+        StructField("flag_combined_json", StringType(), False),
+        StructField("u_avg", FloatType(), False),
+        StructField("v_avg", FloatType(), False),
+        StructField("w_avg", FloatType(), False),
+        StructField("time_avg", FloatType(), False),
+        StructField("n_input_rows", IntegerType(), False),
+        StructField("window_dt_s", FloatType(), False),
+        StructField("baseline_length", FloatType(), False),
+        StructField("delta_t_max", FloatType(), False),
+        StructField("antenna1", IntegerType(), False),
+        StructField("antenna2", IntegerType(), False),
+        StructField("scan_number", IntegerType(), False),
+        StructField("group_key_str", StringType(), True),
+        StructField("input_rows_count", IntegerType(), True),
+    ])
