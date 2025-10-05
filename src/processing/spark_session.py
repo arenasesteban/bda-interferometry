@@ -1,8 +1,9 @@
 """
-Spark Session - Simple Session Management
+Spark Session Management for Interferometry Data Processing
 
-Minimal Spark session setup for interferometry data streaming.
-Focused on essential functionality for Kafka integration.
+Provides Spark session creation and configuration management for distributed
+interferometry data streaming with Kafka integration and optimized settings
+for BDA processing workflows.
 """
 
 import json
@@ -16,32 +17,38 @@ from pyspark.sql.types import (
     FloatType, ArrayType, BooleanType, LongType
 )
 
+# Initialize findspark at module level
+findspark.init()
+
 
 def create_spark_session(config_path: str = None) -> SparkSession:
     """
-    Create a simple Spark session for streaming.
+    Creates optimized Spark session for interferometry data streaming.
+    
+    Configures Spark with Kafka integration, adaptive query execution,
+    and optimized settings for distributed BDA processing workflows.
     
     Parameters
     ----------
     config_path : str, optional
-        Path to configuration file. Uses defaults if None.
+        Path to JSON configuration file for custom settings
         
     Returns
     -------
     SparkSession
-        Configured Spark session
+        Configured Spark session with streaming optimizations
     """
-    # Initialize findspark
-    findspark.init()
-    
-    # Load configuration
     config = load_config(config_path)
     
-    # Create session
+    # Create session with optimized configurations
     spark = SparkSession.builder \
         .appName(config["spark"]["app_name"]) \
         .master(config["spark"]["master"]) \
         .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0") \
+        .config("spark.sql.shuffle.partitions", "16") \
+        .config("spark.sql.adaptive.enabled", "true") \
+        .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+        .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
         .getOrCreate()
     
     # Reduce logging verbosity
@@ -52,17 +59,20 @@ def create_spark_session(config_path: str = None) -> SparkSession:
 
 def load_config(config_path: str = None) -> Dict[str, Any]:
     """
-    Load Spark configuration.
+    Loads Spark and Kafka configuration from JSON file or defaults.
+    
+    Merges user-provided configuration with default settings for
+    Spark session creation and Kafka streaming parameters.
     
     Parameters
     ----------
     config_path : str, optional
-        Path to config file
+        Path to JSON configuration file
         
     Returns
     -------
     Dict[str, Any]
-        Configuration dictionary
+        Merged configuration dictionary with Spark and Kafka settings
     """
     # Default configuration
     default_config = {
@@ -94,17 +104,20 @@ def load_config(config_path: str = None) -> Dict[str, Any]:
 
 def get_kafka_options(config: Dict[str, Any]) -> Dict[str, str]:
     """
-    Get Kafka options for Spark streaming.
+    Extracts Kafka connection options for Spark streaming configuration.
+    
+    Converts configuration dictionary into Spark-compatible Kafka options
+    for structured streaming data source configuration.
     
     Parameters
     ----------
     config : Dict[str, Any]
-        Configuration dictionary
+        Configuration dictionary containing Kafka settings
         
     Returns
     -------
     Dict[str, str]
-        Kafka options for Spark
+        Kafka options formatted for Spark streaming
     """
     kafka_config = config["kafka"]
     
@@ -117,15 +130,16 @@ def get_kafka_options(config: Dict[str, Any]) -> Dict[str, str]:
 
 def get_visibility_row_schema() -> StructType:
     """
-    Define Spark schema for individual visibility rows after chunk expansion.
+    Defines Spark schema for individual visibility rows after chunk expansion.
     
-    This schema matches the structure created by decompose_chunk_to_rows()
-    to ensure compatibility with existing BDA processing.
+    Creates structured schema matching expanded visibility data format
+    with baseline identifiers, coordinates, scientific arrays, and metadata
+    for distributed BDA processing compatibility.
     
     Returns
     -------
     StructType
-        Spark schema for visibility rows
+        Spark schema definition for visibility row structure
     """
     return StructType([
         # Grouping identifiers
@@ -156,14 +170,16 @@ def get_visibility_row_schema() -> StructType:
 
 def get_grouped_visibility_schema() -> StructType:
     """
-    Define Spark schema for grouped visibility data (baseline + scan).
+    Defines Spark schema for grouped visibility data by baseline and scan.
     
-    This schema is used after groupBy operations for BDA processing.
+    Creates schema structure for visibility data grouped by baseline-scan
+    combinations, containing group metadata and arrays of visibility rows
+    for distributed BDA processing operations.
     
     Returns
     -------
     StructType
-        Spark schema for grouped visibility data
+        Spark schema definition for grouped visibility structure
     """
     return StructType([
         StructField("group_key", StringType(), False),
@@ -178,15 +194,16 @@ def get_grouped_visibility_schema() -> StructType:
 
 def get_bda_result_schema() -> StructType:
     """
-    Define Spark schema for BDA processing results.
+    Defines Spark schema for BDA processing output results.
     
-    This schema matches the output structure from BDA algorithms
-    for consistent distributed processing.
+    Creates schema structure for averaged visibility data output from
+    BDA algorithms, including averaged arrays, coordinates, timing
+    metadata, and compression statistics for result consistency.
     
     Returns
     -------
     StructType
-        Spark schema for BDA results
+        Spark schema definition for BDA processing results
     """
     return StructType([
         StructField("visibility_averaged_json", StringType(), False),
