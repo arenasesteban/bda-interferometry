@@ -418,112 +418,115 @@ def deserialize_chunk_udf():
     return udf(deserialize_chunk_data, StringType())
 
 
-def process_streaming_batch(df, epoch_id):
+# Sprint 1: Removed simple processing function that used collect()
+# Only distributed processing remains
+
+def process_streaming_batch_distributed(df, epoch_id):
     """
-    Process streaming batch para FASE 2: Descomposición y Agrupación BDA - VERSIÓN CONCISA.
+    Process streaming batch with DISTRIBUTED BDA processing (Sprints 2-5).
+    
+    This function implements the complete distributed processing pipeline:
+    - Sprint 2: Distributed deserialization and row expansion
+    - Sprint 3: Distributed grouping by (baseline, scan)
+    - Sprint 4: Distributed BDA processing on Spark workers
+    - Sprint 5: Distributed final aggregation
+    
+    Parameters
+    ----------
+    df : DataFrame
+        Spark DataFrame with Kafka messages
+    epoch_id : int
+        Microbatch epoch ID
     """
+    from pyspark.sql.functions import count, avg, sum as spark_sum, countDistinct
+    from bda.bda_integration import apply_distributed_bda_pipeline
     
     current_time = datetime.now().strftime("%H:%M:%S")
     start_time = time.time()
     
     try:
-        # Obtener datos del DataFrame
+        # Check if we have data to process
         row_count = df.count()
         
         if row_count == 0:
-            print(f"� [{current_time}] Microbatch {epoch_id}: 0 chunks (waiting...)")
+            print(f"⏰ [{current_time}] Microbatch {epoch_id}: 0 chunks (waiting...)")
             return
             
-        # Recolectar y procesar mensajes de Kafka
-        kafka_rows = df.collect()
-        total_chunks = 0
-        total_rows = 0
-        all_groups = {}
+        print(f"\n🚀✨ [{current_time}] Microbatch {epoch_id}: {row_count} chunks - DISTRIBUTED BDA PROCESSING")
+        print("=" * 80)
         
-        print(f"\n🚀 [{current_time}] Microbatch {epoch_id}: {len(kafka_rows)} chunks")
-        print("-" * 50)
+        # Load BDA configuration
+        config_path = str(project_root / "configs" / "bda_config.json")
+        bda_config = load_bda_config_with_fallback(config_path)
         
-        # Procesar cada chunk
-        for kafka_row in kafka_rows:
-            try:
-                # Deserializar y descomponer chunk
-                raw_bytes = kafka_row.chunk_data
-                chunk = deserialize_chunk_data(raw_bytes)
-                
-                if not chunk:
-                    continue
-                    
-                total_chunks += 1
-                rows = decompose_chunk_to_rows(chunk)
-                total_rows += len(rows)
-                
-                # Logging conciso del chunk
-                log_chunk_summary(chunk, rows)
-                
-                # Agrupar filas por baseline+scan
-                chunk_groups = group_rows_by_baseline_scan(rows)
-                for group_key, group_rows in chunk_groups.items():
-                    if group_key not in all_groups:
-                        all_groups[group_key] = []
-                    all_groups[group_key].extend(group_rows)
-                
-            except Exception as e:
-                print(f"❌ Chunk error: {e}")
-                continue
+        print(f"🔧 BDA Config: freq={bda_config['frequency_hz']/1e9:.1f}GHz, "
+              f"decorr={bda_config['decorr_factor']}, safety={bda_config['safety_factor']}")
         
-        # APLICAR BDA A LOS GRUPOS
-        if all_groups:
-            print("\n🔬 Applying BDA to groups...")
+        # Apply complete distributed BDA pipeline with Sprint 5 enhancements
+        try:
+            # Sprint 5: Enhanced pipeline with KPIs and production optimizations
+            pipeline_result = apply_distributed_bda_pipeline(
+                df, 
+                bda_config,
+                enable_event_time=True,
+                watermark_duration="2 minutes",
+                config_file_path="configs/bda_config.json"
+            )
             
-            try:
-                # Cargar configuración BDA
-                config_path = str(project_root / "configs" / "bda_config.json")
-                bda_config = load_bda_config_with_fallback(config_path)
-                
-                # Convertir grupos a lista de filas para BDA
-                all_rows = []
-                for group_rows in all_groups.values():
-                    all_rows.extend(group_rows)
-                
-                # Aplicar BDA
-                bda_results = process_microbatch_with_bda(all_rows, bda_config)
-                
-                # Crear estadísticas resumen
-                bda_stats = create_bda_summary_stats(bda_results)
-                
-                # Logging de resultados BDA
-                print(f"🎯 BDA Results:")
-                print(f"   📊 Input rows: {bda_stats.get('total_input_rows', 0)}")
-                print(f"   📈 Output windows: {bda_stats.get('total_windows', 0)}")
-                print(f"   📉 Compression: {bda_stats.get('compression_ratio', 0):.2f}:1")
-                print(f"   ⏱️  Avg window duration: {bda_stats.get('avg_window_duration_s', 0):.2f}s")
-                
-                # Formatear algunos resultados para inspección
-                if bda_results:
-                    sample_results = bda_results[:3]  # Primeros 3 para inspección
-                    print("\n📋 Sample BDA Results:")
-                    for i, result in enumerate(sample_results):
-                        formatted = format_bda_result_for_output(result)
-                        print(f"   Window {i+1}: baseline({result['antenna1']}-{result['antenna2']}) "
-                              f"averaged {result['n_input_rows']} rows → "
-                              f"Δt={result['window_dt_s']:.2f}s")
-                
-            except Exception as e:
-                print(f"❌ BDA processing error: {e}")
-                # Continuar sin BDA si hay errores
+            # Sprint 5: Extract results and KPIs
+            final_results_df = pipeline_result['results']
+            kpi_summary_df = pipeline_result['kpis']
+            pipeline_config = pipeline_result['config']
+            spark_config = pipeline_result['spark_config']
             
-        # Resumen final del microbatch
-        processing_time = (time.time() - start_time) * 1000
-        print("-" * 50)
-        print(f"✅ Summary: {total_chunks} chunks | {total_rows} rows | {len(all_groups)} groups | {processing_time:.0f}ms")
+            # Collect ONLY Sprint 5 distributed KPIs (not raw data)
+            print("📊 Sprint 5: Collecting distributed BDA KPIs...")
+            bda_kpis = kpi_summary_df.collect()[0]  # Sprint 5: Enhanced KPIs, still only aggregated stats
+            
+            # Sprint 5: Enhanced KPI reporting with distributed metrics
+            total_input_rows = bda_kpis["total_input_rows"] or 0
+            total_windows = bda_kpis["total_windows"] or 0
+            compression_factor = bda_kpis["compression_factor"] or 1.0
+            compression_ratio_pct = bda_kpis["compression_ratio_pct"] or 0.0
+            
+            # Enhanced logging with Sprint 5 DISTRIBUTED processing info
+            processing_time = (time.time() - start_time) * 1000
+            
+            print(f"✅ SPRINT 5 DISTRIBUTED BDA PROCESSING SUMMARY:")
+            print(f"   📦 Input chunks: {row_count}")
+            print(f"   📊 Total input rows: {total_input_rows}")
+            print(f"   🎯 BDA windows generated: {total_windows}")
+            print(f"   � Compression factor: {compression_factor:.1f}:1")
+            print(f"   📊 Compression ratio: {compression_ratio_pct:.1f}%")
+            print(f"   🔗 Unique (baseline,scan) groups processed distributedly")
+            print(f"   ⏱️  Window duration p50/p90/p99: {bda_kpis.get('window_dt_p50', 0):.3f}s / {bda_kpis.get('window_dt_p90', 0):.3f}s / {bda_kpis.get('window_dt_p99', 0):.3f}s")
+            print(f"   ⚡ Baseline length avg: {bda_kpis.get('baseline_length_avg', 0):.1f} wavelengths")
+            print(f"   🔧 Spark config: {spark_config.get('spark.sql.shuffle.partitions', 'default')} partitions")
+            print(f"   ⏱️  Processing time: {processing_time:.0f}ms")
+            print(f"   🎯✨ SPRINT 5 BDA successfully applied with production optimizations")
+            
+            # Sprint 1: Sample results collection removed to eliminate collect() calls
+            print("\n📋 DISTRIBUTED BDA Processing completed successfully")
+            print("   Sample results collection disabled for pure distributed processing")
+                      
+        except Exception as e:
+            print(f"❌ DISTRIBUTED BDA processing error: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Sprint 1: No fallback - distributed processing only
+            print("❌ Distributed processing failed - no fallback available")
+            return
         
-        if all_groups:
-            log_groups_summary(all_groups)
+        print("=" * 80)
+        print(f"✅ Microbatch {epoch_id} completed with DISTRIBUTED processing")
         
     except Exception as e:
-        print(f"❌ Microbatch {epoch_id} error: {e}")
+        print(f"❌ Distributed microbatch {epoch_id} error: {e}")
+        import traceback
+        traceback.print_exc()
         
-    print()  # Línea en blanco para separar microbatches
+    print()  # Separator line
 
 
 def simulate_distributed_processing(chunk_metadata: dict, partition_id: int) -> float:
@@ -569,19 +572,35 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
                       topic: str = "visibility-stream",
                       config_path: str = None) -> None:
     """
-    Run the Spark streaming consumer with enhanced debugging and real-time feedback.
+    Run the Spark streaming consumer with DISTRIBUTED BDA processing.
+    
+    This consumer uses only distributed processing with Spark UDFs:
+    - Sprint 1: Optimized Kafka → Spark pipeline
+    - Sprint 2: Distributed deserialization UDF  
+    - Sprint 3: Distributed grouping and aggregation
+    - Watermarks and event time for streaming robustness
+    
+    Parameters
+    ----------
+    kafka_servers : str
+        Kafka bootstrap servers
+    topic : str
+        Kafka topic name
+    config_path : str, optional
+        Path to configuration file
     """
     
     start_time = datetime.now().strftime("%H:%M:%S")
     
-    print("🚀 BDA Interferometry Spark Consumer - FASE 2")
-    print("🎯 FEATURES: Row Decomposition + Baseline+Scan Grouping")
+    print("🚀 BDA Interferometry Spark Consumer - DISTRIBUTED PROCESSING")
+    print("🎯 FEATURES: Distributed BDA + Event Time + Watermarks")
     print("=" * 70)
     print(f"📡 Kafka Servers: {kafka_servers}")
     print(f"📻 Topic: {topic}")
     print(f"🕐 Started: {start_time}")
     print(f"⚡ Microbatch Trigger: 10 seconds")
-    print(f"🔄 No Windowing (deferred to Fase 3)")
+    print("✨ Pipeline: Kafka → Deserialize UDF → Group → BDA UDF → Aggregate")
+    print("🌊 Watermarks: 2 minutes for late data handling")
     print("=" * 70)
     
     # Check Kafka connectivity first
@@ -625,36 +644,48 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
             .option("startingOffsets", "earliest") \
             .option("failOnDataLoss", "false") \
             .option("kafka.auto.create.topics.enable", "true") \
-            .option("kafka.num.partitions", "4") \
+            .option("kafka.num.partitions", "8") \
             .option("kafka.metadata.max.age.ms", "5000") \
             .option("kafka.session.timeout.ms", "30000") \
             .option("kafka.request.timeout.ms", "40000") \
             .option("kafka.retry.backoff.ms", "1000") \
-            .option("maxOffsetsPerTrigger", "1000") \
+            .option("maxOffsetsPerTrigger", "5000") \
             .load()
         
-        print("✅ Connected to Kafka stream")
+        print("✅ Connected to Kafka stream with Sprint 1 optimizations")
         
-        # Simple processing without windowing (Fase 2)
+        # Process with event time and watermarks for robustness
         processed_df = kafka_df.select(
             kafka_df.key.cast("string").alias("message_key"),
             kafka_df.value.alias("chunk_data"),
-            kafka_df.timestamp.alias("kafka_timestamp")
+            kafka_df.timestamp.alias("kafka_timestamp"),
+            kafka_df.timestamp.alias("event_time")  # Add event time for watermarks
         )
         
-        print("✅ Streaming configured for Fase 2 (chunk decomposition + baseline grouping)")
+        # Add watermark for late data handling
+        watermarked_df = processed_df.withWatermark("event_time", "2 minutes")
         
-        # Configure Spark for optimal performance
-        spark.conf.set("spark.sql.shuffle.partitions", "4")
-        spark.conf.set("spark.sql.adaptive.enabled", "false")
+        print("✅ Watermarks configured: 2 minutes for late data tolerance")
         
-        # Start streaming query with detailed monitoring
+        # Configure Spark for optimal distributed performance
+        spark.conf.set("spark.sql.shuffle.partitions", "16")  # Increased for better parallelism
+        spark.conf.set("spark.sql.adaptive.enabled", "true")   # Enable adaptive query execution
+        spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+        spark.conf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+        
+        print("✅ Spark optimized for distributed processing")
+        
+        # Start streaming query with appropriate processing mode
         print("\n🔍 Phase 5: Starting streaming query...")
-        query = processed_df.writeStream \
-            .foreachBatch(process_streaming_batch) \
+        
+        # Use only distributed processing
+        print("✨ Using DISTRIBUTED BDA processing with watermarks")
+        
+        query = watermarked_df.writeStream \
+            .foreachBatch(process_streaming_batch_distributed) \
             .outputMode("append") \
             .trigger(processingTime='10 seconds') \
-            .option("checkpointLocation", "/tmp/spark-bda-fase2-checkpoint") \
+            .option("checkpointLocation", "/tmp/spark-bda-distributed-checkpoint") \
             .start()
         
         print("✅ Consumer ready - waiting for data...")
@@ -748,9 +779,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python spark_consumer_service.py
-  python spark_consumer_service.py --kafka-servers localhost:9092
-  python spark_consumer_service.py --topic my-visibility-stream
+  python consumer_service.py                              # Distributed BDA processing
+  python consumer_service.py --kafka-servers localhost:9092
+  python consumer_service.py --topic my-visibility-stream
+  python consumer_service.py --config /path/to/bda_config.json
         """
     )
     
