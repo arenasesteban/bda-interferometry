@@ -1,9 +1,9 @@
 """
 BDA Processor - Practical BDA Application in Streaming Flow
 
-Implements practical BDA application according to specified flow:
+Implements practical BDA application with the following operations:
 1. Grouping by (baseline, scan_number)  
-2. Calculate baseline_length = sqrt(u²+v²)
+2. Calculate baseline length = sqrt(u²+v²)
 3. Define smearing tolerance
 4. Temporal windowing
 5. Window averaging
@@ -11,6 +11,7 @@ Implements practical BDA application according to specified flow:
 This module integrates with the consumer service to apply BDA to microbatches.
 """
 
+import logging
 import numpy as np
 from typing import Dict, Any, List, Tuple
 from collections import defaultdict
@@ -18,21 +19,21 @@ from collections import defaultdict
 from .bda_core import create_bda_config, apply_bda_to_group
 
 
-def normalize_baseline_key_bda(antenna1: int, antenna2: int) -> Tuple[int, int]:
+def normalize_baseline_key(antenna1: int, antenna2: int) -> Tuple[int, int]:
     """
     Normalize baseline for consistency with consumer service.
     
     Parameters
     ----------
     antenna1 : int
-        First antenna
+        First antenna identifier
     antenna2 : int
-        Second antenna
+        Second antenna identifier
         
     Returns
     -------
     Tuple[int, int]
-        Normalized (ant_min, ant_max)
+        Normalized antenna pair as (min_antenna, max_antenna)
     """
     return tuple(sorted([antenna1, antenna2]))
 
@@ -142,18 +143,16 @@ def process_microbatch_with_bda(rows_data: List[Dict[str, Any]],
     """
     Process complete microbatch applying BDA.
     
-    Implements complete BDA flow:
-    1. Group rows by (baseline, scan_number)
-    2. Convert to numpy arrays
-    3. Apply BDA to each group
-    4. Return averaged visibilities
+    Implements complete BDA flow by grouping rows by (baseline, scan_number),
+    converting to numpy arrays, applying BDA to each group, and returning
+    averaged visibilities.
     
     Parameters
     ----------
     rows_data : List[Dict[str, Any]]
         List of visibility rows from microbatch
     bda_config : Dict[str, float], optional
-        BDA configuration
+        BDA configuration parameters
         
     Returns
     -------
@@ -164,7 +163,7 @@ def process_microbatch_with_bda(rows_data: List[Dict[str, Any]],
         bda_config = create_bda_config()
     
     groups = group_visibility_rows(rows_data)
-    print(f"📊 BDA Processing: {len(rows_data)} input rows → {len(groups)} groups")
+    logging.info(f"BDA Processing: {len(rows_data)} input rows → {len(groups)} groups")
     
     all_averaged_results = []
     
@@ -190,32 +189,32 @@ def process_microbatch_with_bda(rows_data: List[Dict[str, Any]],
         
         all_averaged_results.extend(averaged_results)
         
-        print(f"  📈 Group ({antenna1}-{antenna2}, scan {scan_number}): "
-              f"{len(group_rows)} rows → {len(averaged_results)} windows")
+        logging.debug(f"  Group ({antenna1}-{antenna2}, scan {scan_number}): "
+                     f"{len(group_rows)} rows → {len(averaged_results)} windows")
     
     total_compression = len(rows_data) / len(all_averaged_results) if all_averaged_results else 1
-    print(f"🎯 BDA Complete: compression ratio {total_compression:.2f}:1 "
-          f"({len(rows_data)} → {len(all_averaged_results)} averaged visibilities)")
+    logging.info(f"BDA Complete: compression ratio {total_compression:.2f}:1 "
+                f"({len(rows_data)} → {len(all_averaged_results)} averaged visibilities)")
     
     return all_averaged_results
 
 
 def format_bda_result_for_output(bda_result: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Format BDA result for output/storage.
+    Format BDA result for output and storage.
     
-    Convert numpy arrays to lists and add additional metadata
+    Converts numpy arrays to lists and adds additional metadata
     to facilitate serialization and later analysis.
     
     Parameters
     ----------
     bda_result : Dict[str, Any]
-        BDA result with numpy arrays
+        BDA result containing numpy arrays
         
     Returns
     -------
     Dict[str, Any]
-        Formatted result for serialization
+        Formatted result ready for serialization
     """
     formatted = {
         'visibility_averaged': bda_result['visibility_averaged'].tolist(),
@@ -246,18 +245,18 @@ def create_bda_summary_stats(bda_results: List[Dict[str, Any]]) -> Dict[str, Any
     """
     Create BDA processing summary statistics.
     
-    Generate useful metrics for monitoring and analysis of
-    BDA algorithm performance in streaming.
+    Generates useful metrics for monitoring and analysis of
+    BDA algorithm performance in streaming environments.
     
     Parameters
     ----------
     bda_results : List[Dict[str, Any]]
-        List of BDA results
+        List of BDA processing results
         
     Returns
     -------
     Dict[str, Any]
-        Summary statistics
+        Dictionary containing summary statistics and performance metrics
     """
     if not bda_results:
         return {'total_windows': 0, 'total_input_rows': 0}

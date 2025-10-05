@@ -19,9 +19,16 @@ try:
         load_bda_config_with_fallback,
         get_default_bda_config
     )
+    from .bda_analysis import (
+        analyze_baseline_distribution,
+        estimate_bda_potential,
+        format_bda_report,
+        validate_row_structure
+    )
     
 except ImportError as e:
-    print(f"Warning: BDA module imports failed: {e}")
+    import logging
+    logging.warning(f"BDA module imports failed: {e}")
     
     def process_microbatch_with_bda(*args, **kwargs):
         return []
@@ -30,11 +37,22 @@ except ImportError as e:
         return {'decorr_factor': 0.95, 'frequency_hz': 42.5e9, 'declination_deg': -45.0}
 
 __all__ = [
+    # Core BDA functions
     'create_bda_config',
     'apply_bda_to_group',
+    
+    # Processing functions
     'process_microbatch_with_bda',
     'format_bda_result_for_output',
     'create_bda_summary_stats',
+    
+    # Configuration functions
     'load_bda_config_with_fallback',
-    'get_default_bda_config'
+    'get_default_bda_config',
+    
+    # Analysis functions (moved from bda_utils)
+    'analyze_baseline_distribution',
+    'estimate_bda_potential',
+    'format_bda_report',
+    'validate_row_structure'
 ]

@@ -6,6 +6,7 @@ No classes, no state, only functions that transform data.
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import Dict, Any
 
@@ -29,7 +30,7 @@ def load_bda_config(config_path: str) -> Dict[str, float]:
     FileNotFoundError
         If file does not exist
     ValueError
-        Si el JSON no es válido
+        If JSON is invalid
     """
     config_file = Path(config_path)
     
@@ -40,13 +41,13 @@ def load_bda_config(config_path: str) -> Dict[str, float]:
         with open(config_file, 'r') as f:
             config = json.load(f)
         
-        # Validar que tiene los campos mínimos requeridos
+        # Validate required fields
         required_fields = ['decorr_factor', 'frequency_hz', 'declination_deg']
         for field in required_fields:
             if field not in config:
                 raise ValueError(f"Missing required field '{field}' in BDA config")
         
-        # Agregar safety_factor si no existe
+        # Add safety_factor if not present
         if 'safety_factor' not in config:
             config['safety_factor'] = 0.8
         
@@ -60,12 +61,12 @@ def load_bda_config(config_path: str) -> Dict[str, float]:
 
 def get_default_bda_config() -> Dict[str, float]:
     """
-    Retorna configuración BDA por defecto para ALMA Band 1.
+    Returns default BDA configuration for ALMA Band 1.
     
     Returns
     -------
     Dict[str, float]
-        Configuración por defecto
+        Default configuration
     """
     return {
         'decorr_factor': 0.95,
@@ -77,21 +78,21 @@ def get_default_bda_config() -> Dict[str, float]:
 
 def load_bda_config_with_fallback(config_path: str) -> Dict[str, float]:
     """
-    Carga configuración BDA con fallback a valores por defecto.
+    Loads BDA configuration with fallback to default values.
     
     Parameters
     ----------
     config_path : str
-        Ruta al archivo de configuración
+        Path to configuration file
         
     Returns
     -------
     Dict[str, float]
-        Configuración cargada o por defecto si hay error
+        Loaded configuration or default if error occurs
     """
     try:
         return load_bda_config(config_path)
     except Exception as e:
-        print(f"⚠️  Could not load BDA config from {config_path}: {e}")
-        print("🔄 Using default BDA configuration...")
+        logging.warning(f"Could not load BDA config from {config_path}: {e}")
+        logging.info("Using default BDA configuration...")
         return get_default_bda_config()
