@@ -1,5 +1,5 @@
 """
-Spark Consumer Service - Kafka to Spark Streaming Integration
+Consumer Service - Interferometry Data Streaming Microservice
 
 Consumes interferometry visibility data from Kafka using Spark Structured Streaming.
 Deserializes chunks and provides basic distributed processing with console output.
@@ -12,6 +12,7 @@ import sys
 import argparse
 from pathlib import Path
 import time
+import traceback
 from datetime import datetime, timedelta
 import msgpack
 import numpy as np
@@ -20,7 +21,7 @@ import json
 import random
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import udf
+from pyspark.sql.functions import udf, count, avg, sum as spark_sum, countDistinct
 from pyspark.sql.types import StringType
 from kafka.admin import KafkaAdminClient, NewTopic
 from kafka.errors import TopicAlreadyExistsError
@@ -33,6 +34,7 @@ sys.path.append(str(src_path))
 from processing.spark_session import create_spark_session
 from bda.bda_processor import process_microbatch_with_bda, format_bda_result_for_output, create_bda_summary_stats
 from bda.bda_config import load_bda_config_with_fallback, get_default_bda_config
+from bda.bda_integration import apply_distributed_bda_pipeline
 
 
 def ensure_kafka_topic_exists(kafka_servers: str, topic: str, num_partitions: int = 4, max_retries: int = 30) -> bool:
@@ -172,7 +174,7 @@ def wait_for_kafka_ready(kafka_servers: str, timeout: int = 60) -> bool:
 
 def deserialize_chunk_data(raw_data_bytes: bytes) -> dict:
     """
-    Deserialize MessagePack chunk data from Kafka - FASE 2 Version.
+    Deserialize MessagePack chunk data from Kafka.
     
     Deserializes complete chunk with all arrays for row decomposition.
     
@@ -217,21 +219,21 @@ def deserialize_chunk_data(raw_data_bytes: bytes) -> dict:
 
 def decompose_chunk_to_rows(chunk: dict) -> list:
     """
-    Descompone un chunk en filas individuales para procesamiento BDA - FASE 2.
+    Decompose chunk into individual rows for BDA processing.
     
-    Convierte un chunk que contiene múltiples filas de visibilidades
-    en una lista de registros individuales, cada uno representando
-    una fila con su baseline_key y scan_number.
+    Converts a chunk containing multiple visibility rows into a list of
+    individual records, each representing one row with its baseline_key
+    and scan_number.
     
     Parameters
     ----------
     chunk : dict
-        Chunk deserializado con arrays científicos
+        Deserialized chunk with scientific arrays
         
     Returns
     -------
     list
-        Lista de filas individuales con baseline_key y metadata
+        List of individual rows with baseline_key and metadata
     """
 
     rows = []
@@ -243,7 +245,7 @@ def decompose_chunk_to_rows(chunk: dict) -> list:
         if nrows == 0:
             return rows
             
-        # Extraer arrays principales
+        # Extract main arrays
         antenna1 = chunk.get('antenna1', np.array([]))
         antenna2 = chunk.get('antenna2', np.array([]))
         scan_number = chunk.get('scan_number', np.array([]))
@@ -255,41 +257,41 @@ def decompose_chunk_to_rows(chunk: dict) -> list:
         weight = chunk.get('weight', np.array([]))
         flag = chunk.get('flag', np.array([]))
         
-        # Validar dimensiones
+        # Validate dimensions
         if len(antenna1) != nrows or len(antenna2) != nrows:
             print(f"⚠️  Dimension mismatch in chunk {chunk.get('chunk_id', 'unknown')}")
             return rows
             
-        # Descomponer fila por fila
+        # Decompose row by row
         for row_idx in range(nrows):
             ant1 = int(antenna1[row_idx]) if len(antenna1) > row_idx else -1
             ant2 = int(antenna2[row_idx]) if len(antenna2) > row_idx else -1
             scan_num = int(scan_number[row_idx]) if len(scan_number) > row_idx else -1
             
-            # Crear baseline_key normalizado
+            # Create normalized baseline_key
             baseline_key = normalize_baseline_key(ant1, ant2, subms_id)
             
-            # Crear registro de fila individual
+            # Create individual row record
             row_record = {
-                # Identificadores para agrupación
+                # Identifiers for grouping
                 'baseline_key': baseline_key,
                 'scan_number': scan_num,
                 'antenna1': ant1,
                 'antenna2': ant2,
                 'subms_id': subms_id,
                 
-                # Metadata temporal y espacial
+                # Temporal and spatial metadata
                 'time': float(time_array[row_idx]) if len(time_array) > row_idx else 0.0,
                 'u': float(u_array[row_idx]) if len(u_array) > row_idx else 0.0,
                 'v': float(v_array[row_idx]) if len(v_array) > row_idx else 0.0,
                 'w': float(w_array[row_idx]) if len(w_array) > row_idx else 0.0,
                 
-                # Datos científicos reales para BDA
+                # Real scientific data for BDA
                 'visibility': visibilities[row_idx] if len(visibilities) > row_idx else np.array([]),
                 'weight': weight[row_idx] if len(weight) > row_idx else np.array([]),
                 'flag': flag[row_idx] if len(flag) > row_idx else np.array([]),
                 
-                # Metadata original del chunk
+                # Original chunk metadata
                 'original_chunk_id': chunk.get('chunk_id', -1),
                 'row_index_in_chunk': row_idx,
                 'field_id': chunk.get('field_id', -1),
@@ -306,17 +308,17 @@ def decompose_chunk_to_rows(chunk: dict) -> list:
 
 def group_rows_by_baseline_scan(rows: list) -> dict:
     """
-    Agrupa filas individuales por baseline_key + scan_number - FASE 2.
+    Group individual rows by baseline_key + scan_number.
     
     Parameters
     ----------
     rows : list
-        Lista de filas individuales decomposed from chunks
+        List of individual rows decomposed from chunks
         
     Returns
     -------
     dict
-        Diccionario con groups key = (baseline_key, scan_number)
+        Dictionary with group keys (baseline_key, scan_number)
     """
     groups = {}
     
@@ -324,15 +326,15 @@ def group_rows_by_baseline_scan(rows: list) -> dict:
         baseline_key = row.get('baseline_key', 'unknown')
         scan_number = row.get('scan_number', -1)
         
-        # Crear group key usando función consistente
-        # Extraer antenna1, antenna2 del baseline_key si es posible
+        # Create group key using consistent function
+        # Extract antenna1, antenna2 from baseline_key if possible
         if 'antenna1' in row and 'antenna2' in row:
             ant1 = row['antenna1']
             ant2 = row['antenna2']
             subms_id = row.get('subms_id', None)
             group_key = create_group_key(ant1, ant2, scan_number, subms_id)
         else:
-            # Fallback al método anterior
+            # Fallback to previous method
             group_key = f"{baseline_key}_scan{scan_number}"
         
         if group_key not in groups:
@@ -345,12 +347,19 @@ def group_rows_by_baseline_scan(rows: list) -> dict:
 
 def log_chunk_summary(chunk_metadata: dict, rows: list) -> None:
     """
-    Logging conciso con información esencial del chunk - FASE 2.
+    Log concise summary with essential chunk information.
+    
+    Parameters
+    ----------
+    chunk_metadata : dict
+        Chunk metadata information
+    rows : list
+        List of processed rows
     """
     chunk_id = chunk_metadata.get('chunk_id', 'unknown')
     subms_id = chunk_metadata.get('subms_id', 'unknown')
     
-    # Calcular estadísticas esenciales
+    # Calculate essential statistics
     unique_baselines = set([row.get('baseline_key', 'unknown') for row in rows])
     unique_scans = set([row.get('scan_number', -1) for row in rows])
     times = [row.get('time', 0.0) for row in rows]
@@ -361,7 +370,12 @@ def log_chunk_summary(chunk_metadata: dict, rows: list) -> None:
 
 def log_groups_summary(groups: dict) -> None:
     """
-    Logging conciso de grupos por baseline + scan - FASE 2.
+    Log concise summary of groups by baseline + scan.
+    
+    Parameters
+    ----------
+    groups : dict
+        Dictionary of grouped rows by baseline and scan
     """
     total_rows = sum(len(group_rows) for group_rows in groups.values())
     print(f"� Groups: {len(groups)} | Total rows: {total_rows}")
@@ -418,18 +432,13 @@ def deserialize_chunk_udf():
     return udf(deserialize_chunk_data, StringType())
 
 
-# Sprint 1: Removed simple processing function that used collect()
-# Only distributed processing remains
-
 def process_streaming_batch_distributed(df, epoch_id):
     """
-    Process streaming batch with DISTRIBUTED BDA processing (Sprints 2-5).
+    Process streaming batch with distributed BDA processing.
     
-    This function implements the complete distributed processing pipeline:
-    - Sprint 2: Distributed deserialization and row expansion
-    - Sprint 3: Distributed grouping by (baseline, scan)
-    - Sprint 4: Distributed BDA processing on Spark workers
-    - Sprint 5: Distributed final aggregation
+    Implements complete distributed processing pipeline including distributed
+    deserialization and row expansion, distributed grouping by (baseline, scan),
+    distributed BDA processing on Spark workers, and distributed final aggregation.
     
     Parameters
     ----------
@@ -438,8 +447,7 @@ def process_streaming_batch_distributed(df, epoch_id):
     epoch_id : int
         Microbatch epoch ID
     """
-    from pyspark.sql.functions import count, avg, sum as spark_sum, countDistinct
-    from bda.bda_integration import apply_distributed_bda_pipeline
+
     
     current_time = datetime.now().strftime("%H:%M:%S")
     start_time = time.time()
@@ -462,9 +470,9 @@ def process_streaming_batch_distributed(df, epoch_id):
         print(f"🔧 BDA Config: freq={bda_config['frequency_hz']/1e9:.1f}GHz, "
               f"decorr={bda_config['decorr_factor']}, safety={bda_config['safety_factor']}")
         
-        # Apply complete distributed BDA pipeline with Sprint 5 enhancements
+        # Apply complete distributed BDA pipeline with enhancements
         try:
-            # Sprint 5: Enhanced pipeline with KPIs and production optimizations
+            # Enhanced pipeline with KPIs and production optimizations
             pipeline_result = apply_distributed_bda_pipeline(
                 df, 
                 bda_config,
@@ -473,26 +481,36 @@ def process_streaming_batch_distributed(df, epoch_id):
                 config_file_path="configs/bda_config.json"
             )
             
-            # Sprint 5: Extract results and KPIs
+            # Extract results and KPIs
             final_results_df = pipeline_result['results']
             kpi_summary_df = pipeline_result['kpis']
             pipeline_config = pipeline_result['config']
             spark_config = pipeline_result['spark_config']
             
-            # Collect ONLY Sprint 5 distributed KPIs (not raw data)
-            print("📊 Sprint 5: Collecting distributed BDA KPIs...")
-            bda_kpis = kpi_summary_df.collect()[0]  # Sprint 5: Enhanced KPIs, still only aggregated stats
+            # Collect ONLY distributed KPIs (not raw data) - optimized with limit(1)
+            print("📊 Collecting distributed BDA KPIs...")
+            bda_kpis_rows = kpi_summary_df.limit(1).collect()  # Limit to 1 row to be safe
+            if bda_kpis_rows:
+                bda_kpis = bda_kpis_rows[0].asDict()  # Convert PySpark Row to dictionary for .get() access
+            else:
+                # Fallback if no KPIs collected
+                bda_kpis = {
+                    'total_input_rows': 0,
+                    'total_windows': 0,
+                    'compression_factor': 1.0,
+                    'compression_ratio_pct': 0.0
+                }
             
-            # Sprint 5: Enhanced KPI reporting with distributed metrics
+            # Enhanced KPI reporting with distributed metrics
             total_input_rows = bda_kpis["total_input_rows"] or 0
             total_windows = bda_kpis["total_windows"] or 0
             compression_factor = bda_kpis["compression_factor"] or 1.0
             compression_ratio_pct = bda_kpis["compression_ratio_pct"] or 0.0
             
-            # Enhanced logging with Sprint 5 DISTRIBUTED processing info
+            # Enhanced logging with distributed processing info
             processing_time = (time.time() - start_time) * 1000
             
-            print(f"✅ SPRINT 5 DISTRIBUTED BDA PROCESSING SUMMARY:")
+            print(f"✅ DISTRIBUTED BDA PROCESSING SUMMARY:")
             print(f"   📦 Input chunks: {row_count}")
             print(f"   📊 Total input rows: {total_input_rows}")
             print(f"   🎯 BDA windows generated: {total_windows}")
@@ -503,18 +521,17 @@ def process_streaming_batch_distributed(df, epoch_id):
             print(f"   ⚡ Baseline length avg: {bda_kpis.get('baseline_length_avg', 0):.1f} wavelengths")
             print(f"   🔧 Spark config: {spark_config.get('spark.sql.shuffle.partitions', 'default')} partitions")
             print(f"   ⏱️  Processing time: {processing_time:.0f}ms")
-            print(f"   🎯✨ SPRINT 5 BDA successfully applied with production optimizations")
+            print(f"   🎯✨ BDA successfully applied with production optimizations")
             
-            # Sprint 1: Sample results collection removed to eliminate collect() calls
+            # Sample results collection removed to eliminate collect() calls
             print("\n📋 DISTRIBUTED BDA Processing completed successfully")
             print("   Sample results collection disabled for pure distributed processing")
                       
         except Exception as e:
             print(f"❌ DISTRIBUTED BDA processing error: {e}")
-            import traceback
             traceback.print_exc()
             
-            # Sprint 1: No fallback - distributed processing only
+            # No fallback - distributed processing only
             print("❌ Distributed processing failed - no fallback available")
             return
         
@@ -523,7 +540,6 @@ def process_streaming_batch_distributed(df, epoch_id):
         
     except Exception as e:
         print(f"❌ Distributed microbatch {epoch_id} error: {e}")
-        import traceback
         traceback.print_exc()
         
     print()  # Separator line
@@ -572,13 +588,12 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
                       topic: str = "visibility-stream",
                       config_path: str = None) -> None:
     """
-    Run the Spark streaming consumer with DISTRIBUTED BDA processing.
+    Run the Spark streaming consumer with distributed BDA processing.
     
-    This consumer uses only distributed processing with Spark UDFs:
-    - Sprint 1: Optimized Kafka → Spark pipeline
-    - Sprint 2: Distributed deserialization UDF  
-    - Sprint 3: Distributed grouping and aggregation
-    - Watermarks and event time for streaming robustness
+    This consumer uses distributed processing with Spark UDFs including
+    optimized Kafka to Spark pipeline, distributed deserialization UDF,
+    distributed grouping and aggregation, with watermarks and event time
+    for streaming robustness.
     
     Parameters
     ----------
@@ -604,7 +619,7 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
     print("=" * 70)
     
     # Check Kafka connectivity first
-    print("🔍 Phase 1: Checking Kafka connectivity...")
+    print("🔍 Checking Kafka connectivity...")
     if not wait_for_kafka_ready(kafka_servers, timeout=60):
         print("❌ Kafka is not ready. Please check Kafka service status.")
         print("💡 Try: docker-compose up -d")
@@ -612,7 +627,7 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
     print("✅ Kafka is ready and responsive")
     
     # Ensure Kafka topic exists before connecting
-    print(f"\n🔍 Phase 2: Verifying topic '{topic}'...")
+    print(f"\n🔍 Verifying topic '{topic}'...")
     topic_ready = ensure_kafka_topic_exists(kafka_servers, topic, num_partitions=4, max_retries=30)
     
     if topic_ready:
@@ -625,7 +640,7 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
     time.sleep(2)
     
     # Create Spark session
-    print("\n� Phase 3: Initializing Spark session...")
+    print("\n🔧 Initializing Spark session...")
     spark = create_spark_session(config_path)
     print(f"✅ Spark session created with {spark.sparkContext.defaultParallelism} cores")
     
@@ -635,13 +650,13 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
         print("✅ Deserializer UDF configured")
         
         # Read from Kafka with enhanced configuration for robustness
-        print("\n� Phase 4: Connecting to Kafka stream...")
+        print("\n🔗 Connecting to Kafka stream...")
         kafka_df = spark \
             .readStream \
             .format("kafka") \
             .option("kafka.bootstrap.servers", kafka_servers) \
             .option("subscribe", topic) \
-            .option("startingOffsets", "earliest") \
+            .option("startingOffsets", "latest") \
             .option("failOnDataLoss", "false") \
             .option("kafka.auto.create.topics.enable", "true") \
             .option("kafka.num.partitions", "8") \
@@ -652,7 +667,7 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
             .option("maxOffsetsPerTrigger", "5000") \
             .load()
         
-        print("✅ Connected to Kafka stream with Sprint 1 optimizations")
+        print("✅ Connected to Kafka stream with optimizations")
         
         # Process with event time and watermarks for robustness
         processed_df = kafka_df.select(
@@ -667,16 +682,10 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
         
         print("✅ Watermarks configured: 2 minutes for late data tolerance")
         
-        # Configure Spark for optimal distributed performance
-        spark.conf.set("spark.sql.shuffle.partitions", "16")  # Increased for better parallelism
-        spark.conf.set("spark.sql.adaptive.enabled", "true")   # Enable adaptive query execution
-        spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
-        spark.conf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-        
-        print("✅ Spark optimized for distributed processing")
+        print("✅ Spark optimized for distributed processing (configured at session creation)")
         
         # Start streaming query with appropriate processing mode
-        print("\n🔍 Phase 5: Starting streaming query...")
+        print("\n🔍 Starting streaming query...")
         
         # Use only distributed processing
         print("✨ Using DISTRIBUTED BDA processing with watermarks")
@@ -695,7 +704,7 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
         # Wait for termination with simplified status updates
         try:
             while query.isActive:
-                time.sleep(30)  # Menos heartbeats frecuentes
+                time.sleep(30)  # Less frequent heartbeats
                 current_time = datetime.now().strftime("%H:%M:%S")
                 print(f"💓 [{current_time}] Listening...")
         except KeyboardInterrupt:
@@ -708,7 +717,6 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
         
     except Exception as e:
         print(f"❌ Error in streaming: {e}")
-        import traceback
         traceback.print_exc()
         
     finally:
@@ -719,26 +727,26 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
 
 def normalize_baseline_key(antenna1: int, antenna2: int, subms_id: str = None) -> str:
     """
-    Normaliza la clave de baseline para consistencia entre consumer y BDA.
+    Normalize baseline key for consistency between consumer and BDA.
     
-    Garantiza que (1,3) y (3,1) generen la misma clave, y opcionalmente
-    incluye subms_id para distinguir diferentes SubMS.
+    Ensures that (1,3) and (3,1) generate the same key, and optionally
+    includes subms_id to distinguish different SubMS.
     
     Parameters
     ----------
     antenna1 : int
-        Primera antena del baseline
+        First antenna of the baseline
     antenna2 : int
-        Segunda antena del baseline  
+        Second antenna of the baseline  
     subms_id : str, optional
-        ID del SubMS para distinguir entre diferentes particiones
+        SubMS ID to distinguish between different partitions
         
     Returns
     -------
     str
-        Clave normalizada del baseline
+        Normalized baseline key
     """
-    # Normalizar orden: siempre min-max
+    # Normalize order: always min-max
     ant_min, ant_max = sorted([antenna1, antenna2])
     
     if subms_id:
@@ -749,23 +757,23 @@ def normalize_baseline_key(antenna1: int, antenna2: int, subms_id: str = None) -
 
 def create_group_key(antenna1: int, antenna2: int, scan_number: int, subms_id: str = None) -> str:
     """
-    Crea clave de grupo consistente para (baseline, scan_number).
+    Create consistent group key for (baseline, scan_number).
     
     Parameters
     ----------
     antenna1 : int
-        Primera antena
+        First antenna
     antenna2 : int
-        Segunda antena
+        Second antenna
     scan_number : int
-        Número de scan
+        Scan number
     subms_id : str, optional
-        ID del SubMS
+        SubMS ID
         
     Returns
     -------
     str
-        Clave de grupo normalizada
+        Normalized group key
     """
     baseline_key = normalize_baseline_key(antenna1, antenna2, subms_id)
     return f"{baseline_key}_scan{scan_number}"
