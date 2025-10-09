@@ -5,6 +5,8 @@ channels:
 dependencies:
   - python=3.10
   - numpy
+  - pandas
+  - pyarrow=14.0.2
   - matplotlib
   - astropy
   - dask
@@ -12,6 +14,7 @@ dependencies:
   - pip
   - pyspark=3.5.0
   - findspark
+  - openjdk=11
   - pip:
     - kafka-python
     - msgpack
