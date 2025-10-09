@@ -8,6 +8,9 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    # Memory limits for 8GB systems
+    mem_limit: 256m
+    mem_reservation: 128m
 
   kafka:
     image: confluentinc/cp-kafka:7.4.0
@@ -27,3 +30,30 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      
+      # Memory optimization for 8GB systems
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
+      
+      # Message size limits (2MB max to prevent OOM)
+      KAFKA_MESSAGE_MAX_BYTES: 2097152
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 2097152  
+      KAFKA_FETCH_MAX_BYTES: 2097152
+      
+      # Short retention for development (5 minutes)
+      KAFKA_LOG_RETENTION_MS: 300000
+      KAFKA_LOG_SEGMENT_BYTES: 134217728  # 128MB segments
+      
+      # Optimize for low-memory environments
+      KAFKA_NUM_NETWORK_THREADS: 3
+      KAFKA_NUM_IO_THREADS: 4
+      KAFKA_SOCKET_SEND_BUFFER_BYTES: 102400     # 100KB
+      KAFKA_SOCKET_RECEIVE_BUFFER_BYTES: 102400  # 100KB
+      KAFKA_SOCKET_REQUEST_MAX_BYTES: 2097152    # 2MB
+      
+      # Reduce background threads
+      KAFKA_NUM_REPLICA_FETCHERS: 1
+      KAFKA_NUM_RECOVERY_THREADS_PER_DATA_DIR: 1
+    
+    # Container memory limits
+    mem_limit: 1g
+    mem_reservation: 512m
