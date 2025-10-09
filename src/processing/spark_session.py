@@ -40,15 +40,17 @@ def create_spark_session(config_path: str = None) -> SparkSession:
     """
     config = load_config(config_path)
     
-    # Create session with optimized configurations
+    # Create session with optimized configurations (OPCIÓN A - Memory conservative)
     spark = SparkSession.builder \
         .appName(config["spark"]["app_name"]) \
         .master(config["spark"]["master"]) \
         .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0") \
-        .config("spark.sql.shuffle.partitions", "16") \
-        .config("spark.sql.adaptive.enabled", "true") \
-        .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+        .config("spark.sql.shuffle.partitions", "4") \
+        .config("spark.sql.adaptive.enabled", "false") \
+        .config("spark.sql.adaptive.coalescePartitions.enabled", "false") \
         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
+        .config("spark.driver.memory", "4g") \
+        .config("spark.python.worker.reuse", "true") \
         .getOrCreate()
     
     # Reduce logging verbosity
