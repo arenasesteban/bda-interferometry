@@ -21,10 +21,12 @@ import json
 import random
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import udf, count, avg, sum as spark_sum, countDistinct
-from pyspark.sql.types import StringType
-from kafka.admin import KafkaAdminClient, NewTopic
-from kafka.errors import TopicAlreadyExistsError
+from pyspark.sql.functions import udf, count, avg, sum as spark_sum, countDistinct, explode, col, struct, array, lit
+from pyspark.sql.types import (
+    StringType, StructType, StructField, IntegerType, FloatType, 
+    DoubleType, ArrayType, BinaryType
+)
+# Kafka admin imports removed - consumer only processes streams, doesn't manage topics
 
 # Add src directory to path
 project_root = Path(__file__).parent.parent
@@ -37,146 +39,16 @@ from bda.bda_config import load_bda_config_with_fallback, get_default_bda_config
 from bda.bda_integration import apply_distributed_bda_pipeline
 
 
-def ensure_kafka_topic_exists(kafka_servers: str, topic: str, num_partitions: int = 4, max_retries: int = 30) -> bool:
-    """
-    Ensure that a Kafka topic exists, creating it if necessary with robust retry logic.
-    
-    This function checks if the specified topic exists in Kafka. If it doesn't exist,
-    it creates the topic with the specified number of partitions and waits for it to
-    be available. This is essential for the streaming architecture to handle topic
-    creation before consumers connect.
-    
-    Parameters
-    ----------
-    kafka_servers : str
-        Kafka bootstrap servers
-    topic : str
-        Topic name to create/verify
-    num_partitions : int
-        Number of partitions for the topic (default: 4 for distributed processing)
-    max_retries : int
-        Maximum number of retries to wait for topic availability (default: 30)
-        
-    Returns
-    -------
-    bool
-        True if topic exists or was created successfully
-    """
-    
-    try:
-        # Create admin client with longer timeout
-        admin_client = KafkaAdminClient(
-            bootstrap_servers=kafka_servers.split(','),
-            client_id='spark_consumer_admin',
-            request_timeout_ms=10000,
-            connections_max_idle_ms=60000
-        )
-        
-        # Retry loop to ensure topic is available
-        for attempt in range(max_retries):
-            try:
-                # Check if topic exists
-                existing_topics = admin_client.list_topics()
-                if topic in existing_topics:
-                    print(f"✅ Topic '{topic}' is available (attempt {attempt + 1})")
-                    return True
-                
-                # If this is the first attempt, try to create the topic
-                if attempt == 0:
-                    topic_config = NewTopic(
-                        name=topic,
-                        num_partitions=num_partitions,
-                        replication_factor=1
-                    )
-                    
-                    print(f"🔧 Creating topic '{topic}' with {num_partitions} partitions...")
-                    admin_client.create_topics([topic_config])
-                    print(f"✅ Topic '{topic}' creation initiated")
-                
-                # Wait before next check
-                if attempt < max_retries - 1:
-                    print(f"⏳ Waiting for topic '{topic}' to be available... (attempt {attempt + 1}/{max_retries})")
-                    time.sleep(1)
-                    
-            except TopicAlreadyExistsError:
-                print(f"✅ Topic '{topic}' already exists (concurrent creation)")
-                # Still need to verify it's available
-                time.sleep(0.5)
-                continue
-                
-            except Exception as e:
-                if attempt == 0:
-                    print(f"⚠️  Could not create topic '{topic}': {e}")
-                    print(f"🔄 Will wait for auto-create or manual creation...")
-                time.sleep(1)
-                continue
-        
-        print(f"⚠️  Topic '{topic}' not confirmed available after {max_retries} attempts")
-        print(f"🔄 Proceeding with streaming (relying on Kafka auto-create)")
-        return False
-        
-    except Exception as e:
-        print(f"❌ Error managing topic '{topic}': {e}")
-        print(f"🔄 Will rely on Kafka auto-create during streaming")
-        return False
-
-
-def wait_for_kafka_ready(kafka_servers: str, timeout: int = 60) -> bool:
-    """
-    Wait for Kafka to be ready and responsive.
-    
-    Parameters
-    ----------
-    kafka_servers : str
-        Kafka bootstrap servers
-    timeout : int
-        Maximum time to wait in seconds
-        
-    Returns
-    -------
-    bool
-        True if Kafka is ready
-    """
-    
-    print(f"🔍 Checking Kafka connectivity to {kafka_servers}...")
-    
-    try:        
-        end_time = datetime.now() + timedelta(seconds=timeout)
-        
-        while datetime.now() < end_time:
-            try:
-                admin_client = KafkaAdminClient(
-                    bootstrap_servers=kafka_servers.split(','),
-                    client_id='kafka_health_check',
-                    request_timeout_ms=5000
-                )
-                
-                # Try to list topics as a connectivity test
-                topics = admin_client.list_topics()
-                print(f"✅ Kafka is ready! Found {len(topics)} topics")
-                return True
-                
-            except Exception as e:
-                remaining = int((end_time - datetime.now()).total_seconds())
-                if remaining > 0:
-                    print(f"⏳ Kafka not ready yet... retrying in 2s (timeout: {remaining}s)")
-                    time.sleep(2)
-                else:
-                    break
-        
-        print(f"❌ Kafka not ready after {timeout}s timeout")
-        return False
-        
-    except Exception as e:
-        print(f"❌ Cannot check Kafka connectivity: {e}")
-        return False
+# Topic management functions removed - now handled by bootstrap script or producer service
+# This keeps the consumer lightweight and focused on pure streaming processing
 
 
 def deserialize_chunk_data(raw_data_bytes: bytes) -> dict:
     """
-    Deserialize MessagePack chunk data from Kafka.
+    Deserialize MessagePack chunk data from Kafka with enhanced logging.
     
-    Deserializes complete chunk with all arrays for row decomposition.
+    Compatible with producer's serialize_chunk() function using matching
+    MessagePack parameters and comprehensive array reconstruction.
     
     Parameters
     ----------
@@ -190,30 +62,59 @@ def deserialize_chunk_data(raw_data_bytes: bytes) -> dict:
     """
     
     try:
-        # Deserialize MessagePack
+        # Match producer MessagePack parameters: use_bin_type=True, strict_types=False
+        # Consumer equivalent: raw=False, strict_map_key=False  
         msgpack_data = msgpack.unpackb(raw_data_bytes, raw=False, strict_map_key=False)
         
         chunk = {}
+        arrays_processed = 0
+        total_data_size = 0
+        
         for key, value in msgpack_data.items():
             if isinstance(value, dict) and 'type' in value:
                 if value['type'] == 'ndarray_compressed':
                     # Decompress and reconstruct array
-                    decompressed = zlib.decompress(value['data'])
-                    array = np.frombuffer(decompressed, dtype=value['dtype'])
-                    chunk[key] = array.reshape(value['shape'])
+                    try:
+                        decompressed = zlib.decompress(value['data'])
+                        array = np.frombuffer(decompressed, dtype=value['dtype'])
+                        chunk[key] = array.reshape(value['shape'])
+                        arrays_processed += 1
+                        total_data_size += array.nbytes
+                    except Exception as e:
+                        print(f"⚠️  Failed to decompress array '{key}': {e}")
+                        chunk[key] = None
+                        
                 elif value['type'] == 'ndarray':
                     # Reconstruct array directly
-                    array = np.frombuffer(value['data'], dtype=value['dtype'])
-                    chunk[key] = array.reshape(value['shape'])
+                    try:
+                        array = np.frombuffer(value['data'], dtype=value['dtype'])
+                        chunk[key] = array.reshape(value['shape'])
+                        arrays_processed += 1 
+                        total_data_size += array.nbytes
+                    except Exception as e:
+                        print(f"⚠️  Failed to reconstruct array '{key}': {e}")
+                        chunk[key] = None
                 else:
+                    # Unknown array type
+                    print(f"⚠️  Unknown array type for '{key}': {value.get('type', 'unknown')}")
                     chunk[key] = value
             else:
+                # Non-array data (metadata)
                 chunk[key] = value
-                
+        
+        # Log successful deserialization with details
+        chunk_id = chunk.get('chunk_id', 'unknown')
+        subms_id = chunk.get('subms_id', 'unknown')
+        nrows = chunk.get('nrows', 0)
+        
+        print(f"✅ Deserialized chunk {subms_id}_{chunk_id}: {nrows} rows, {arrays_processed} arrays, {total_data_size/1024:.1f}KB")
+        
         return chunk
         
     except Exception as e:
         print(f"❌ Error deserializing chunk: {e}")
+        print(f"   Raw data size: {len(raw_data_bytes)} bytes")
+        traceback.print_exc()
         return {}
 
 
@@ -381,168 +282,315 @@ def log_groups_summary(groups: dict) -> None:
     print(f"� Groups: {len(groups)} | Total rows: {total_rows}")
 
 
-def deserialize_chunk_udf():
+def create_deserialize_to_structs_udf():
     """
-    Create UDF for deserializing MessagePack chunks in Spark.
+    Create lightweight UDF that deserializes MessagePack to Spark structs (not pandas).
+    
+    This is a "cheap" deserialization optimized for memory efficiency:
+    - No pandas DataFrames in the critical path
+    - Returns native Spark Row objects
+    - Minimal memory footprint per chunk
     
     Returns
     -------
     function
-        Spark UDF for chunk deserialization
+        Spark UDF that returns struct with visibility rows
     """
     
-    def deserialize_chunk_data(raw_data_bytes):
-        """
-        Deserialize MessagePack chunk data.
+    # Define the output schema matching producer's chunk structure
+    visibility_row_schema = StructType([
+        # Metadata fields (match producer exactly)
+        StructField("chunk_id", IntegerType(), True),
+        StructField("subms_id", StringType(), True), 
+        StructField("field_id", IntegerType(), True),
+        StructField("spw_id", IntegerType(), True),
+        StructField("polarization_id", IntegerType(), True),
         
-        Parameters
-        ----------
-        raw_data_bytes : bytes
-            Raw MessagePack serialized data
-            
-        Returns
-        -------
-        str
-            JSON string of deserialized chunk metadata
+        # Baseline and scan identifiers (critical for BDA grouping)
+        StructField("antenna1", IntegerType(), True),
+        StructField("antenna2", IntegerType(), True),
+        StructField("scan_number", IntegerType(), True),
+        StructField("baseline_key", StringType(), True),
+        
+        # Temporal and spatial metadata
+        StructField("time", DoubleType(), True),
+        StructField("u", DoubleType(), True),
+        StructField("v", DoubleType(), True),
+        StructField("w", DoubleType(), True),
+        
+        # Integration time metadata (critical for BDA)
+        StructField("exposure", DoubleType(), True),
+        StructField("interval", DoubleType(), True),
+        StructField("integration_time_s", DoubleType(), True),
+        
+        # Scientific data arrays (match producer field names exactly)
+        StructField("visibilities", BinaryType(), True),  # Changed from 'visibility_data'
+        StructField("weight", BinaryType(), True),        # Changed from 'weight_data' 
+        StructField("flag", BinaryType(), True)           # Changed from 'flag_data'
+    ])
+    
+    rows_array_schema = ArrayType(visibility_row_schema)
+    
+    def deserialize_chunk_to_rows(raw_data_bytes):
+        """
+        Deserialize MessagePack chunk directly to list of Row structs.
+        
+        Enhanced deserialization with detailed logging and field name matching.
+        Compatible with producer's serialize_chunk() output structure.
         """
         try:
-            # Unpack MessagePack data
-            msgpack_chunk = msgpack.unpackb(raw_data_bytes, raw=False)
+            # Use matching MessagePack parameters with producer
+            chunk = msgpack.unpackb(raw_data_bytes, raw=False, strict_map_key=False)
             
-            # Extract metadata only (not full arrays for performance)
-            metadata = {}
+            # Extract metadata (match producer field names exactly)
+            chunk_id = chunk.get('chunk_id', -1)
+            subms_id = chunk.get('subms_id', 'unknown')
+            field_id = chunk.get('field_id', -1)
+            spw_id = chunk.get('spw_id', -1) 
+            polarization_id = chunk.get('polarization_id', -1)
+            nrows = chunk.get('nrows', 0)
             
-            for key, value in msgpack_chunk.items():
-                if isinstance(value, dict) and value.get('type') in ['ndarray', 'ndarray_compressed']:
-                    # For arrays, just extract shape and dtype info
-                    metadata[key] = {
-                        'shape': value.get('shape', []),
-                        'dtype': value.get('dtype', 'unknown'),
-                        'compressed': value.get('type') == 'ndarray_compressed'
-                    }
-                else:
-                    # Keep simple values as-is
-                    metadata[key] = value
+            # Log deserialization attempt
+            print(f"🔍 Deserializing chunk {subms_id}_{chunk_id}: {nrows} rows expected")
             
-            return json.dumps(metadata)
+            if nrows == 0:
+                print(f"⚠️  Empty chunk - no rows to process")
+                return []
+            
+            # Enhanced array extraction with detailed logging
+            def extract_array(key, expected_length=None):
+                if key not in chunk:
+                    print(f"⚠️  Missing array '{key}' in chunk")
+                    return np.array([])
+                    
+                value = chunk[key]
+                try:
+                    if isinstance(value, dict) and value.get('type') == 'ndarray_compressed':
+                        decompressed = zlib.decompress(value['data'])
+                        array = np.frombuffer(decompressed, dtype=value['dtype'])
+                        reconstructed = array.reshape(value['shape'])
+                        print(f"   ✅ Decompressed '{key}': {reconstructed.shape} {reconstructed.dtype}")
+                        return reconstructed
+                        
+                    elif isinstance(value, dict) and value.get('type') == 'ndarray':
+                        array = np.frombuffer(value['data'], dtype=value['dtype'])
+                        reconstructed = array.reshape(value['shape'])
+                        print(f"   ✅ Reconstructed '{key}': {reconstructed.shape} {reconstructed.dtype}")
+                        return reconstructed
+                        
+                    elif isinstance(value, (list, np.ndarray)):
+                        # Direct array data
+                        array = np.array(value)
+                        print(f"   ✅ Direct array '{key}': {array.shape} {array.dtype}")
+                        return array
+                        
+                    else:
+                        print(f"   ⚠️  Unknown format for '{key}': {type(value)}")
+                        return np.array(value) if hasattr(value, '__iter__') else np.array([])
+                        
+                except Exception as e:
+                    print(f"   ❌ Failed to extract '{key}': {e}")
+                    return np.array([])
+            
+            # Extract arrays using producer field names
+            antenna1 = extract_array('antenna1', nrows)
+            antenna2 = extract_array('antenna2', nrows)
+            scan_number = extract_array('scan_number', nrows)
+            time_array = extract_array('time', nrows)
+            u_array = extract_array('u', nrows)
+            v_array = extract_array('v', nrows)
+            w_array = extract_array('w', nrows)
+            
+            # Extract timing metadata
+            exposure = extract_array('exposure', nrows)
+            interval = extract_array('interval', nrows)
+            integration_time_s = chunk.get('integration_time_s', 180.0)  # Scalar value
+            
+            # Extract scientific data arrays
+            visibilities = extract_array('visibilities')  # Shape: [nrows, nchans, npols]
+            weight = extract_array('weight')              # Shape: [nrows, npols] or [nrows, nchans, npols]
+            flag = extract_array('flag')                  # Shape: [nrows, nchans, npols]
+            
+            # Validation
+            actual_rows = min(len(antenna1), len(antenna2)) if len(antenna1) > 0 and len(antenna2) > 0 else 0
+            if actual_rows != nrows:
+                print(f"⚠️  Row count mismatch: expected {nrows}, got {actual_rows}")
+                nrows = actual_rows
+            
+            if nrows == 0:
+                print(f"❌ No valid rows after extraction")
+                return []
+            
+            # Create rows efficiently
+            rows = []
+            for i in range(nrows):
+                try:
+                    ant1 = int(antenna1[i]) if i < len(antenna1) else -1
+                    ant2 = int(antenna2[i]) if i < len(antenna2) else -1
+                    
+                    # Create normalized baseline key (consistent with consumer functions)
+                    baseline_key = normalize_baseline_key(ant1, ant2, subms_id)
+                    
+                    # Extract row-specific scientific data
+                    vis_bytes = visibilities[i].tobytes() if i < len(visibilities) and len(visibilities[i]) > 0 else b''
+                    weight_bytes = weight[i].tobytes() if i < len(weight) and len(weight[i]) > 0 else b''
+                    flag_bytes = flag[i].tobytes() if i < len(flag) and len(flag[i]) > 0 else b''
+                    
+                    # Create row tuple matching updated schema
+                    row = (
+                        chunk_id,
+                        subms_id,
+                        field_id,
+                        spw_id,
+                        polarization_id,
+                        ant1,
+                        ant2,
+                        int(scan_number[i]) if i < len(scan_number) else -1,
+                        baseline_key,
+                        float(time_array[i]) if i < len(time_array) else 0.0,
+                        float(u_array[i]) if i < len(u_array) else 0.0,
+                        float(v_array[i]) if i < len(v_array) else 0.0,
+                        float(w_array[i]) if i < len(w_array) else 0.0,
+                        float(exposure[i]) if i < len(exposure) else 180.0,
+                        float(interval[i]) if i < len(interval) else 180.0,
+                        float(integration_time_s),
+                        vis_bytes,      # Match schema: 'visibilities'
+                        weight_bytes,   # Match schema: 'weight'
+                        flag_bytes      # Match schema: 'flag'
+                    )
+                    rows.append(row)
+                    
+                except Exception as e:
+                    print(f"   ⚠️  Error creating row {i}: {e}")
+                    continue
+            
+            print(f"✅ Successfully created {len(rows)} rows from chunk {subms_id}_{chunk_id}")
+            return rows
             
         except Exception as e:
-            return json.dumps({'error': str(e), 'chunk_id': 'unknown'})
+            print(f"❌ Critical error in deserialization: {e}")
+            print(f"   Raw data size: {len(raw_data_bytes)} bytes")
+            traceback.print_exc()
+            return []
     
-    return udf(deserialize_chunk_data, StringType())
+    return udf(deserialize_chunk_to_rows, rows_array_schema)
 
 
-def process_streaming_batch_distributed(df, epoch_id):
+def process_streaming_batch_optimized(df, epoch_id, enable_event_time=True, watermark_duration="20 seconds"):
     """
-    Process streaming batch with distributed BDA processing.
+    ULTRA-OPTIMIZED foreachBatch implementation with clean, structured logging.
     
-    Implements complete distributed processing pipeline including distributed
-    deserialization and row expansion, distributed grouping by (baseline, scan),
-    distributed BDA processing on Spark workers, and distributed final aggregation.
+    Most heavy lifting (deserialization, explode, repartitioning) happens OUTSIDE
+    in the DataFrame pipeline where Spark can optimize it properly.
+    
+    This function now only handles:
+    - BDA processing on pre-processed rows
+    - Clean, structured logging
+    - Error handling
     
     Parameters
     ----------
     df : DataFrame
-        Spark DataFrame with Kafka messages
+        Pre-processed DataFrame with exploded visibility rows, already partitioned by baseline
     epoch_id : int
         Microbatch epoch ID
+    enable_event_time : bool
+        Whether event-time processing is enabled
+    watermark_duration : str
+        Watermark duration configuration
     """
-
     
     current_time = datetime.now().strftime("%H:%M:%S")
     start_time = time.time()
     
     try:
-        # Check if we have data to process
-        row_count = df.count()
+        # CLEAN LOGGING: Structured microbatch header
+        print(f"\n{'='*60}")
+        print(f"🔄 MICROBATCH {epoch_id:02d} - {current_time}")
+        print(f"{'='*60}")
         
-        if row_count == 0:
-            print(f"⏰ [{current_time}] Microbatch {epoch_id}: 0 chunks (waiting...)")
-            return
-            
-        print(f"\n🚀✨ [{current_time}] Microbatch {epoch_id}: {row_count} chunks - DISTRIBUTED BDA PROCESSING")
-        print("=" * 80)
-        
-        # Load BDA configuration
+        # Load BDA configuration once
         config_path = str(project_root / "configs" / "bda_config.json")
         bda_config = load_bda_config_with_fallback(config_path)
         
-        print(f"🔧 BDA Config: freq={bda_config['frequency_hz']/1e9:.1f}GHz, "
-              f"decorr={bda_config['decorr_factor']}, safety={bda_config['safety_factor']}")
-        
-        # Apply complete distributed BDA pipeline with enhancements
+        # Enhanced logging: Get microbatch statistics
         try:
-            # Enhanced pipeline with KPIs and production optimizations
+            # Get row count and unique chunks (lightweight Spark actions)
+            total_rows = df.count()
+            
+            if total_rows == 0:
+                print("📭 Empty microbatch - no data received")
+                print(f"{'─'*60}")
+                return
+                
+            chunk_info = df.select("chunk_id", "subms_id").distinct().collect()
+            unique_baselines = df.select("baseline_key").distinct().count()
+            unique_scans = df.select("scan_number").distinct().count()
+            
+            print(f"📊 Microbatch statistics:")
+            print(f"   • Total rows: {total_rows}")
+            print(f"   • Unique chunks: {len(chunk_info)}")
+            print(f"   • Unique baselines: {unique_baselines}")
+            print(f"   • Unique scans: {unique_scans}")
+            
+            if chunk_info and len(chunk_info) <= 10:  # Only show details for reasonable number of chunks
+                print(f"📦 Chunks in this microbatch:")
+                for i, chunk in enumerate(chunk_info, 1):
+                    chunk_id = chunk['chunk_id']
+                    subms_id = chunk['subms_id']
+                    print(f"   Chunk {i:02d}: {subms_id}_{chunk_id}")
+            elif len(chunk_info) > 10:
+                print(f"� Large microbatch: {len(chunk_info)} chunks (details omitted)")
+                
+            print(f"{'─'*60}")
+            
+        except Exception as e:
+            print(f"⚠️  Error getting microbatch statistics: {e}")
+            print(f"📦 Processing microbatch (details unavailable)")
+            print(f"{'─'*60}")
+            # Continue processing despite logging issues
+        
+        # Apply BDA to pre-processed, partitioned rows
+        try:
+            # DataFrame at this point contains:
+            # - Deserialized visibility rows (no pandas, memory efficient)
+            # - Exploded from chunks to individual rows  
+            # - Partitioned by baseline_key for balanced load
+            # - Ready for BDA processing (empty batches handled naturally)
+            
+            print("🔧 Applying BDA pipeline...")
+            
+            # Apply BDA pipeline - optimized for throughput
             pipeline_result = apply_distributed_bda_pipeline(
                 df, 
                 bda_config,
-                enable_event_time=True,
-                watermark_duration="2 minutes",
+                enable_event_time=enable_event_time,
+                watermark_duration=watermark_duration,
                 config_file_path="configs/bda_config.json"
             )
             
-            # Extract results and KPIs
-            final_results_df = pipeline_result['results']
-            kpi_summary_df = pipeline_result['kpis']
-            pipeline_config = pipeline_result['config']
-            spark_config = pipeline_result['spark_config']
-            
-            # Collect ONLY distributed KPIs (not raw data) - optimized with limit(1)
-            print("📊 Collecting distributed BDA KPIs...")
-            bda_kpis_rows = kpi_summary_df.limit(1).collect()  # Limit to 1 row to be safe
-            if bda_kpis_rows:
-                bda_kpis = bda_kpis_rows[0].asDict()  # Convert PySpark Row to dictionary for .get() access
-            else:
-                # Fallback if no KPIs collected
-                bda_kpis = {
-                    'total_input_rows': 0,
-                    'total_windows': 0,
-                    'compression_factor': 1.0,
-                    'compression_ratio_pct': 0.0
-                }
-            
-            # Enhanced KPI reporting with distributed metrics
-            total_input_rows = bda_kpis["total_input_rows"] or 0
-            total_windows = bda_kpis["total_windows"] or 0
-            compression_factor = bda_kpis["compression_factor"] or 1.0
-            compression_ratio_pct = bda_kpis["compression_ratio_pct"] or 0.0
-            
-            # Enhanced logging with distributed processing info
+            # Calculate processing time
             processing_time = (time.time() - start_time) * 1000
             
-            print(f"✅ DISTRIBUTED BDA PROCESSING SUMMARY:")
-            print(f"   📦 Input chunks: {row_count}")
-            print(f"   📊 Total input rows: {total_input_rows}")
-            print(f"   🎯 BDA windows generated: {total_windows}")
-            print(f"   � Compression factor: {compression_factor:.1f}:1")
-            print(f"   📊 Compression ratio: {compression_ratio_pct:.1f}%")
-            print(f"   🔗 Unique (baseline,scan) groups processed distributedly")
-            print(f"   ⏱️  Window duration p50/p90/p99: {bda_kpis.get('window_dt_p50', 0):.3f}s / {bda_kpis.get('window_dt_p90', 0):.3f}s / {bda_kpis.get('window_dt_p99', 0):.3f}s")
-            print(f"   ⚡ Baseline length avg: {bda_kpis.get('baseline_length_avg', 0):.1f} wavelengths")
-            print(f"   🔧 Spark config: {spark_config.get('spark.sql.shuffle.partitions', 'default')} partitions")
-            print(f"   ⏱️  Processing time: {processing_time:.0f}ms")
-            print(f"   🎯✨ BDA successfully applied with production optimizations")
-            
-            # Sample results collection removed to eliminate collect() calls
-            print("\n📋 DISTRIBUTED BDA Processing completed successfully")
-            print("   Sample results collection disabled for pure distributed processing")
+            # Clean completion logging
+            print(f"✅ BDA processing completed successfully")
+            print(f"⏱️  Processing time: {processing_time:.0f}ms")
                       
         except Exception as e:
-            print(f"❌ DISTRIBUTED BDA processing error: {e}")
+            print(f"❌ BDA processing failed: {e}")
             traceback.print_exc()
-            
-            # No fallback - distributed processing only
-            print("❌ Distributed processing failed - no fallback available")
             return
         
-        print("=" * 80)
-        print(f"✅ Microbatch {epoch_id} completed with DISTRIBUTED processing")
+        # Microbatch completion
+        total_time = (time.time() - start_time) * 1000
+        print(f"{'─'*60}")
+        print(f"🎯 Microbatch {epoch_id:02d} COMPLETED - Total time: {total_time:.0f}ms")
+        print(f"{'='*60}")
         
     except Exception as e:
-        print(f"❌ Distributed microbatch {epoch_id} error: {e}")
+        print(f"❌ Microbatch {epoch_id:02d} ERROR: {e}")
+        print(f"{'='*60}")
         traceback.print_exc()
-        
-    print()  # Separator line
 
 
 def simulate_distributed_processing(chunk_metadata: dict, partition_id: int) -> float:
@@ -586,7 +634,10 @@ def simulate_distributed_processing(chunk_metadata: dict, partition_id: int) -> 
 
 def run_spark_consumer(kafka_servers: str = "localhost:9092", 
                       topic: str = "visibility-stream",
-                      config_path: str = None) -> None:
+                      config_path: str = None,
+                      enable_event_time: bool = True,
+                      watermark_duration: str = "20 seconds",
+                      max_offsets_per_trigger: int = 200) -> None:
     """
     Run the Spark streaming consumer with distributed BDA processing.
     
@@ -607,50 +658,24 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
     
     start_time = datetime.now().strftime("%H:%M:%S")
     
-    print("🚀 BDA Interferometry Spark Consumer - DISTRIBUTED PROCESSING")
-    print("🎯 FEATURES: Distributed BDA + Event Time + Watermarks")
-    print("=" * 70)
-    print(f"📡 Kafka Servers: {kafka_servers}")
-    print(f"📻 Topic: {topic}")
+    print("🚀 BDA Interferometry Consumer - PRODUCTION OPTIMIZED")
+    print("=" * 60)
+    print(f"📡 Kafka: {kafka_servers} | Topic: {topic}")
+    print(f"⚡ MaxOffsets: {max_offsets_per_trigger} | Event-time: {'ON' if enable_event_time else 'OFF'}")
     print(f"🕐 Started: {start_time}")
-    print(f"⚡ Microbatch Trigger: 10 seconds")
-    print("✨ Pipeline: Kafka → Deserialize UDF → Group → BDA UDF → Aggregate")
-    print("🌊 Watermarks: 2 minutes for late data handling")
-    print("=" * 70)
+    print("=" * 60)
     
-    # Check Kafka connectivity first
-    print("🔍 Checking Kafka connectivity...")
-    if not wait_for_kafka_ready(kafka_servers, timeout=60):
-        print("❌ Kafka is not ready. Please check Kafka service status.")
-        print("💡 Try: docker-compose up -d")
-        return
-    print("✅ Kafka is ready and responsive")
-    
-    # Ensure Kafka topic exists before connecting
-    print(f"\n🔍 Verifying topic '{topic}'...")
-    topic_ready = ensure_kafka_topic_exists(kafka_servers, topic, num_partitions=4, max_retries=30)
-    
-    if topic_ready:
-        print(f"✅ Topic '{topic}' is ready for streaming")
-    else:
-        print(f"⚠️  Topic '{topic}' not confirmed, proceeding with auto-create")
-    
-    # Add a small delay to ensure topic propagation
-    print("⏳ Allowing time for topic propagation...")
-    time.sleep(2)
+    # Skip Kafka admin - assumes topic exists (managed by producer/bootstrap)
+    print("� Skipping Kafka admin checks - topic managed externally")
+    print("� Ensure topic exists: kafka-topics --create --topic visibility-stream --partitions 4")
     
     # Create Spark session
-    print("\n🔧 Initializing Spark session...")
+    print("🔧 Initializing...")
     spark = create_spark_session(config_path)
-    print(f"✅ Spark session created with {spark.sparkContext.defaultParallelism} cores")
     
     try:
-        # Create deserializer UDF
-        deserialize_udf = deserialize_chunk_udf()
-        print("✅ Deserializer UDF configured")
-        
-        # Read from Kafka with enhanced configuration for robustness
-        print("\n🔗 Connecting to Kafka stream...")
+        # Create lightweight deserializer UDF (no pandas!)
+        deserialize_to_structs_udf = create_deserialize_to_structs_udf()
         kafka_df = spark \
             .readStream \
             .format("kafka") \
@@ -658,55 +683,97 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
             .option("subscribe", topic) \
             .option("startingOffsets", "latest") \
             .option("failOnDataLoss", "false") \
-            .option("kafka.auto.create.topics.enable", "true") \
-            .option("kafka.num.partitions", "8") \
-            .option("kafka.metadata.max.age.ms", "5000") \
-            .option("kafka.session.timeout.ms", "30000") \
-            .option("kafka.request.timeout.ms", "40000") \
-            .option("kafka.retry.backoff.ms", "1000") \
-            .option("maxOffsetsPerTrigger", "5000") \
+            .option("maxOffsetsPerTrigger", str(max_offsets_per_trigger)) \
             .load()
         
-        print("✅ Connected to Kafka stream with optimizations")
+        # Step 1: Basic DataFrame with event-time if needed
+        if enable_event_time:
+            kafka_processed = kafka_df.select(
+                kafka_df.key.cast("string").alias("message_key"),
+                kafka_df.value.alias("chunk_data"),
+                kafka_df.timestamp.alias("kafka_timestamp"),
+                kafka_df.timestamp.alias("event_time")
+            )
+        else:
+            kafka_processed = kafka_df.select(
+                kafka_df.key.cast("string").alias("message_key"),
+                kafka_df.value.alias("chunk_data"),
+                kafka_df.timestamp.alias("kafka_timestamp")
+            )
         
-        # Process with event time and watermarks for robustness
-        processed_df = kafka_df.select(
-            kafka_df.key.cast("string").alias("message_key"),
-            kafka_df.value.alias("chunk_data"),
-            kafka_df.timestamp.alias("kafka_timestamp"),
-            kafka_df.timestamp.alias("event_time")  # Add event time for watermarks
+        # Step 2: Deserialize chunks to rows
+        chunks_with_rows = kafka_processed.withColumn(
+            "visibility_rows", 
+            deserialize_to_structs_udf(col("chunk_data"))
         )
         
-        # Add watermark for late data handling
-        watermarked_df = processed_df.withWatermark("event_time", "2 minutes")
+        # Step 3: Explode chunks to individual rows
+        # Step 3: Explode chunks to individual rows with updated field names
+        rows_df = chunks_with_rows.select(
+            col("message_key"),
+            col("kafka_timestamp"),
+            *([col("event_time")] if enable_event_time else []),
+            explode(col("visibility_rows")).alias("row")
+        ).select(
+            col("message_key"),
+            col("kafka_timestamp"),
+            *([col("event_time")] if enable_event_time else []),
+            # Metadata fields
+            col("row.chunk_id").alias("chunk_id"),
+            col("row.subms_id").alias("subms_id"),
+            col("row.field_id").alias("field_id"),
+            col("row.spw_id").alias("spw_id"),
+            col("row.polarization_id").alias("polarization_id"),
+            # Baseline and scan identifiers
+            col("row.antenna1").alias("antenna1"),
+            col("row.antenna2").alias("antenna2"),
+            col("row.scan_number").alias("scan_number"),
+            col("row.baseline_key").alias("baseline_key"),
+            # Temporal and spatial metadata
+            col("row.time").alias("vis_time"),
+            col("row.u").alias("u"),
+            col("row.v").alias("v"), 
+            col("row.w").alias("w"),
+            # Integration time metadata
+            col("row.exposure").alias("exposure"),
+            col("row.interval").alias("interval"),
+            col("row.integration_time_s").alias("integration_time_s"),
+            # Scientific data (corrected field names)
+            col("row.visibilities").alias("visibilities"),  # Corrected from 'visibility_data'
+            col("row.weight").alias("weight"),              # Corrected from 'weight_data'
+            col("row.flag").alias("flag")                   # Corrected from 'flag_data'
+        )
         
-        print("✅ Watermarks configured: 2 minutes for late data tolerance")
+        # Step 4: Partition by baseline for optimal processing
+        processed_df = rows_df.repartition(4, col("baseline_key"))
         
-        print("✅ Spark optimized for distributed processing (configured at session creation)")
+        # Create processing function with configuration
+        def process_batch_with_config(df, epoch_id):
+            return process_streaming_batch_optimized(
+                df, epoch_id, enable_event_time, watermark_duration
+            )
         
-        # Start streaming query with appropriate processing mode
-        print("\n🔍 Starting streaming query...")
+        # Generate unique checkpoint per execution to avoid state conflicts when changing config
+        import uuid
+        checkpoint_path = f"/tmp/spark-bda-{uuid.uuid4().hex[:8]}-{int(time.time())}"
         
-        # Use only distributed processing
-        print("✨ Using DISTRIBUTED BDA processing with watermarks")
-        
-        query = watermarked_df.writeStream \
-            .foreachBatch(process_streaming_batch_distributed) \
+        # Start streaming query
+        query = processed_df.writeStream \
+            .foreachBatch(process_batch_with_config) \
             .outputMode("append") \
             .trigger(processingTime='10 seconds') \
-            .option("checkpointLocation", "/tmp/spark-bda-distributed-checkpoint") \
+            .option("checkpointLocation", checkpoint_path) \
             .start()
         
         print("✅ Consumer ready - waiting for data...")
-        print(f"🔄 Microbatches every 10s | Spark UI: http://localhost:4040 | Ctrl+C to stop")
+        print("🔄 Microbatches every 10s | Ctrl+C to stop")
         print("=" * 60)
         
-        # Wait for termination with simplified status updates
+        # Wait for termination (clean monitoring without interfering with microbatch logs)
         try:
             while query.isActive:
-                time.sleep(30)  # Less frequent heartbeats
-                current_time = datetime.now().strftime("%H:%M:%S")
-                print(f"💓 [{current_time}] Listening...")
+                time.sleep(10)  # Sleep for microbatch intervals
+                    
         except KeyboardInterrupt:
             print("\n🛑 Stopping...")
         
@@ -811,13 +878,35 @@ Examples:
         help="Path to configuration file (optional)"
     )
     
+    parser.add_argument(
+        "--no-event-time",
+        action="store_true",
+        help="Disable event-time processing and watermarks (lab mode)"
+    )
+    
+    parser.add_argument(
+        "--watermark",
+        default="20 seconds",
+        help="Watermark duration for late data tolerance (default: 20 seconds)"
+    )
+    
+    parser.add_argument(
+        "--max-offsets",
+        type=int,
+        default=200,
+        help="Max offsets per trigger for throughput control (default: 200, test: 10, prod: 500+)"
+    )
+    
     args = parser.parse_args()
     
     try:
         run_spark_consumer(
             kafka_servers=args.kafka_servers,
             topic=args.topic,
-            config_path=args.config
+            config_path=args.config,
+            enable_event_time=not args.no_event_time,
+            watermark_duration=args.watermark,
+            max_offsets_per_trigger=args.max_offsets
         )
     except Exception as e:
         print(f"❌ Fatal error: {e}")
