@@ -24,6 +24,7 @@ from pyspark.sql.functions import (
     explode, col, lit, count, sum as spark_sum, avg, max as spark_max, 
     pandas_udf, udf
 )
+from pyspark.sql.pandas.functions import PandasUDFType
 from pyspark.sql.types import (
     StructType, StructField, StringType, IntegerType, FloatType, 
     DoubleType, ArrayType, BinaryType, MapType
@@ -1107,7 +1108,7 @@ def create_distributed_bda_group_processor(bda_config: dict):
         Pandas UDF that processes visibility groups with BDA
     """
     
-    @pandas_udf(returnType=get_bda_result_schema())
+    @pandas_udf(returnType=get_bda_result_schema(), functionType=PandasUDFType.GROUPED_MAP)
     def bda_group_processor(group_df):
         """
         Processes a group (baseline, scan) with BDA on distributed worker.
