@@ -1,45 +1,22 @@
 """
-BDA Core - Core Scientific Algorithms
+BDA Core Scientific Algorithms
 
-Implementation of fundamental scientific algorithms for Baseline-Dependent Averaging
-based on Wijnholds et al. 2018. Includes decorrelation time calculations, fringe rates
-and BDA parameters optimized for radio interferometry.
+Implementation of fundamental scientific algorithms for baseline-dependent averaging
+in radio interferometry data processing. Provides mathematical computations for
+decorrelation time calculations, fringe rate analysis, temporal windowing, and
+weighted visibility averaging based on Wijnholds et al. 2018 methodology.
+
+Functions handle interferometry-specific calculations including baseline length
+determination, optimal averaging time computation, and vectorized visibility
+processing for distributed scientific computing environments.
 """
 
 import numpy as np
 from typing import Dict, Any, Tuple, List
 from astropy import constants as const
 
-
-def create_bda_config(decorr_factor: float = 0.95,
-                     frequency_hz: float = 42.5e9,
-                     declination_deg: float = -45.0,
-                     safety_factor: float = 0.8) -> Dict[str, float]:
-    """
-    Create BDA configuration using simple dictionary.
-    
-    Parameters
-    ----------
-    decorr_factor : float
-        Decorrelation factor R (default: 0.95)
-    frequency_hz : float
-        Observation frequency in Hz (default: 42.5e9)
-    declination_deg : float
-        Source declination in degrees (default: -45.0)
-    safety_factor : float
-        Conservative safety factor (default: 0.8)
-        
-    Returns
-    -------
-    Dict[str, float]
-        BDA configuration as dictionary
-    """
-    return {
-        'decorr_factor': decorr_factor,
-        'frequency_hz': frequency_hz,
-        'declination_deg': declination_deg,
-        'safety_factor': safety_factor
-    }
+# Import configuration from dedicated config module
+from .bda_config import get_default_bda_config
 
 
 def calculate_baseline_length(u: float, v: float, w: float = 0.0, in_wavelengths: bool = True) -> float:
@@ -64,67 +41,6 @@ def calculate_baseline_length(u: float, v: float, w: float = 0.0, in_wavelengths
     """
     baseline_length = np.sqrt(u**2 + v**2)
     return baseline_length
-
-
-def calculate_fringe_rate(baseline_length_lambda: float, 
-                         declination_deg: float = -45.0,
-                         hour_angle_deg: float = 0.0,
-                         baseline_east_fraction: float = 1.0,
-                         baseline_north_fraction: float = 0.0) -> float:
-    """
-    Calculates total fringe rate based on UV coordinate derivatives.
-    
-    Implements equations 42-44 from Wijnholds et al. 2018:
-    - ∂u/∂t = (1/λ) * (Lx*cos(H) - Ly*sin(H)) * ωE * cos(δ)
-    - ∂v/∂t = (1/λ) * (Lx*sin(H)*sin(δ) + Ly*cos(H)*sin(δ)) * ωE  
-    - ∂w/∂t = (1/λ) * (Lx*sin(H)*cos(δ) + Ly*cos(H)*cos(δ)) * ωE
-    
-    Parameters
-    ----------
-    baseline_length_lambda : float
-        Baseline length in wavelengths
-    declination_deg : float, optional
-        Source declination in degrees (default: -45.0)
-    hour_angle_deg : float, optional
-        Hour angle in degrees (default: 0.0 for zenith)
-    baseline_east_fraction : float, optional
-        Fraction of baseline in East direction (default: 1.0)
-    baseline_north_fraction : float, optional
-        Fraction of baseline in North direction (default: 0.0)
-        
-    Returns
-    -------
-    float
-        Total fringe rate in rad/s
-    """
-    # Physical constants
-    omega_earth = 7.2925e-5  # Earth angular velocity in rad/s
-    
-    # Convert angles to radians
-    dec_rad = np.radians(declination_deg)
-    hour_angle_rad = np.radians(hour_angle_deg)
-    
-    # Baseline components in wavelengths
-    Lx_lambda = baseline_length_lambda * baseline_east_fraction
-    Ly_lambda = baseline_length_lambda * baseline_north_fraction
-    
-    # Calculate UV derivatives according to equations 42-43
-    du_dt = (Lx_lambda * np.cos(hour_angle_rad) - 
-             Ly_lambda * np.sin(hour_angle_rad)) * omega_earth * np.cos(dec_rad)
-    
-    dv_dt = (Lx_lambda * np.sin(hour_angle_rad) * np.sin(dec_rad) + 
-             Ly_lambda * np.cos(hour_angle_rad) * np.sin(dec_rad)) * omega_earth
-    
-    # W derivative (equation 44)
-    dw_dt = (Lx_lambda * np.sin(hour_angle_rad) * np.cos(dec_rad) + 
-             Ly_lambda * np.cos(hour_angle_rad) * np.cos(dec_rad)) * omega_earth
-    
-    # Total fringe rate with conservative weight for w-term
-    w_factor = 0.1  # Conservative value
-    
-    total_fringe_rate = np.sqrt(du_dt**2 + dv_dt**2 + (w_factor * dw_dt)**2)
-    
-    return total_fringe_rate
 
 
 def calculate_fringe_rate_conservative(baseline_length_lambda: float,
@@ -187,7 +103,7 @@ def calculate_decorrelation_time(baseline_length_meters: float,
         Decorrelation time in seconds, limited by min/max_averaging_time
     """
     if config is None:
-        config = create_bda_config()
+        config = get_default_bda_config()
     
     # Convert baseline to wavelengths
     wavelength_m = const.c.value / frequency_hz
@@ -244,7 +160,7 @@ def calculate_optimal_averaging_time(u: float, v: float,
         Optimal averaging time in seconds
     """
     if config is None:
-        config = create_bda_config()
+        config = get_default_bda_config()
     
     # Ensure units are in wavelengths
     u_lambda, v_lambda = ensure_baseline_units_wavelengths(u, v, frequency_hz, input_units)
@@ -264,90 +180,6 @@ def calculate_optimal_averaging_time(u: float, v: float,
     )
     
     return averaging_time
-
-
-def validate_bda_config(config: Dict[str, float]) -> Tuple[bool, str]:
-    """
-    Validates BDA configuration to ensure physically reasonable values.
-    
-    Parameters
-    ----------
-    config : Dict[str, float]
-        BDA configuration to validate
-        
-    Returns
-    -------
-    Tuple[bool, str]
-        (is_valid, error_message)
-    """
-    if not (0.0 < config.get('decorr_factor', 0.95) < 1.0):
-        return False, f"decorr_factor debe estar entre 0 y 1, got {config.get('decorr_factor')}"
-    
-    if config.get('frequency_hz', 42.5e9) <= 0:
-        return False, f"frequency_hz debe ser positiva, got {config.get('frequency_hz')}"
-        
-    declination = config.get('declination_deg', -45.0)
-    if not (-90.0 <= declination <= 90.0):
-        return False, f"declination_deg debe estar entre -90 y 90, got {declination}"
-    
-    safety_factor = config.get('safety_factor', 0.8)
-    if not (0.0 < safety_factor <= 1.0):
-        return False, f"safety_factor debe estar entre 0 y 1, got {safety_factor}"
-    
-    return True, "Valid configuration"
-
-
-def get_baseline_classification(baseline_length_lambda: float) -> str:
-    """
-    Classifies a baseline according to its length for analysis.
-    
-    Parameters
-    ----------
-    baseline_length_lambda : float
-        Baseline length in wavelengths
-        
-    Returns
-    -------
-    str
-        Baseline classification
-    """
-    if baseline_length_lambda < 100:
-        return "short"
-    elif baseline_length_lambda < 1000:
-        return "medium"  
-    elif baseline_length_lambda < 10000:
-        return "long"
-    else:
-        return "very_long"
-
-
-def estimate_compression_ratio(baseline_length_lambda: float, 
-                             integration_time_sec: float,
-                             averaging_time_sec: float) -> float:
-    """
-    Estimates expected compression ratio for a baseline.
-    
-    Parameters
-    ----------
-    baseline_length_lambda : float
-        Baseline length in wavelengths
-    integration_time_sec : float
-        Original integration time in seconds
-    averaging_time_sec : float
-        BDA averaging time in seconds
-        
-    Returns
-    -------
-    float
-        Estimated compression ratio (1 - output_size/input_size)
-    """
-    if averaging_time_sec <= integration_time_sec:
-        return 0.0  # No compression
-    
-    compression_factor = averaging_time_sec / integration_time_sec
-    compression_ratio = 1.0 - (1.0 / compression_factor)
-    
-    return compression_ratio
 
 
 def create_bda_windows(times: np.ndarray, 
@@ -525,7 +357,7 @@ def apply_bda_to_group(group_data: Dict[str, np.ndarray],
         List of averaged visibilities per window
     """
     if config is None:
-        config = create_bda_config()
+        config = get_default_bda_config()
     
     # Extract data
     times = group_data['time']

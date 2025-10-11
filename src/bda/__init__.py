@@ -6,15 +6,8 @@ in streaming environments. Based on Wijnholds et al. 2018.
 """
 
 try:
-    from .bda_core import (
-        create_bda_config,
-        apply_bda_to_group
-    )
-    from .bda_processor import (
-        process_microbatch_with_bda,
-        format_bda_result_for_output,
-        create_bda_summary_stats
-    )
+    from .bda_core import apply_bda_to_group
+    from .bda_processor import process_group_with_bda
     from .bda_config import (
         load_bda_config_with_fallback,
         get_default_bda_config
@@ -24,7 +17,7 @@ except ImportError as e:
     import logging
     logging.warning(f"BDA module imports failed: {e}")
     
-    def process_microbatch_with_bda(*args, **kwargs):
+    def process_group_with_bda(*args, **kwargs):
         return []
     
     def load_bda_config_with_fallback(*args, **kwargs):
@@ -32,21 +25,12 @@ except ImportError as e:
 
 __all__ = [
     # Core BDA functions
-    'create_bda_config',
     'apply_bda_to_group',
     
     # Processing functions
-    'process_microbatch_with_bda',
-    'format_bda_result_for_output',
-    'create_bda_summary_stats',
+    'process_group_with_bda',
     
     # Configuration functions
     'load_bda_config_with_fallback',
-    'get_default_bda_config',
-    
-    # Analysis functions (moved from bda_utils)
-    'analyze_baseline_distribution',
-    'estimate_bda_potential',
-    'format_bda_report',
-    'validate_row_structure'
+    'get_default_bda_config'
 ]

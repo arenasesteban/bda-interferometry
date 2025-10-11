@@ -1,36 +1,41 @@
 """
-BDA Config - Simple Configuration Loading
+BDA Configuration Management
 
-Functions for loading BDA configuration from JSON using pure functional programming.
-No classes, no state, only functions that transform data.
+Provides configuration loading and validation functions for baseline-dependent averaging
+parameters. Handles JSON file parsing, default value provision, and fallback mechanisms
+for robust configuration management in streaming interferometry processing.
 """
 
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict
 
 
 def load_bda_config(config_path: str) -> Dict[str, float]:
     """
-    Load BDA configuration from simple JSON file.
+    Load baseline-dependent averaging configuration from JSON file.
+    
+    Reads JSON configuration file, validates required scientific parameters,
+    and ensures all necessary fields are present for BDA algorithm execution.
+    Automatically adds missing optional parameters with default values.
     
     Parameters
     ----------
     config_path : str
-        Path to JSON configuration file
+        Absolute or relative path to JSON configuration file
         
     Returns
     -------
     Dict[str, float]
-        BDA configuration as simple dictionary
+        Dictionary containing validated BDA configuration parameters
         
     Raises
     ------
     FileNotFoundError
-        If file does not exist
+        When the specified configuration file does not exist
     ValueError
-        If JSON is invalid
+        When JSON format is invalid or required fields are missing
     """
     config_file = Path(config_path)
     
@@ -41,13 +46,13 @@ def load_bda_config(config_path: str) -> Dict[str, float]:
         with open(config_file, 'r') as f:
             config = json.load(f)
         
-        # Validate required fields
+        # Check presence of required scientific parameters
         required_fields = ['decorr_factor', 'frequency_hz', 'declination_deg']
         for field in required_fields:
             if field not in config:
                 raise ValueError(f"Missing required field '{field}' in BDA config")
         
-        # Add safety_factor if not present
+        # Apply default value for optional safety factor parameter
         if 'safety_factor' not in config:
             config['safety_factor'] = 0.8
         
@@ -61,34 +66,45 @@ def load_bda_config(config_path: str) -> Dict[str, float]:
 
 def get_default_bda_config() -> Dict[str, float]:
     """
-    Returns default BDA configuration for ALMA Band 1.
+    Provide default baseline-dependent averaging configuration parameters.
+    
+    Returns scientifically validated default values suitable for ALMA Band 1
+    interferometry observations in the southern hemisphere. Values are based
+    on typical observing parameters and conservative safety margins.
     
     Returns
     -------
     Dict[str, float]
-        Default configuration
+        Dictionary containing default BDA configuration with decorrelation factor,
+        observation frequency, source declination, and safety factor parameters
     """
     return {
-        'decorr_factor': 0.95,
-        'frequency_hz': 42.5e9,  # ALMA Band 1 center
-        'declination_deg': -45.0,  # Southern hemisphere
-        'safety_factor': 0.8
+        'decorr_factor': 0.95,        # Decorrelation factor for visibility coherence
+        'frequency_hz': 42.5e9,   # ALMA Band 1 center frequency
+        'declination_deg': -45.0, # Southern hemisphere source declination
+        'safety_factor': 0.8       # Conservative safety margin for averaging
     }
 
 
 def load_bda_config_with_fallback(config_path: str) -> Dict[str, float]:
     """
-    Loads BDA configuration with fallback to default values.
+    Load BDA configuration with automatic fallback to default values.
+    
+    Attempts to load configuration from specified file path. If loading fails
+    due to file not found, invalid JSON, or missing parameters, automatically
+    falls back to scientifically validated default values to ensure system
+    continues operation.
     
     Parameters
     ----------
     config_path : str
-        Path to configuration file
+        Path to JSON configuration file to attempt loading
         
     Returns
     -------
     Dict[str, float]
-        Loaded configuration or default if error occurs
+        Successfully loaded configuration from file, or default configuration
+        if loading fails for any reason
     """
     try:
         return load_bda_config(config_path)
