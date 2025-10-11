@@ -1,11 +1,12 @@
 """
 Consumer Service - Interferometry Data Streaming Microservice
 
-Consumes interferometry visibility data from Kafka using Spark Structured Streaming.
-Deserializes chunks and provides basic distributed processing with console output.
+Processes interferometry visibility data from Kafka streams using Spark Structured Streaming.
+Handles MessagePack deserialization, data validation, baseline normalization, and coordinates
+distributed BDA processing through integration with the BDA pipeline.
 
-This service replaces the traditional Kafka consumer with Spark streaming capabilities
-for distributed processing of large-scale interferometry datasets.
+Functions provide complete streaming pipeline from Kafka consumption through scientific
+data preparation and distributed baseline-dependent averaging.
 """
 
 import sys
@@ -13,20 +14,17 @@ import argparse
 from pathlib import Path
 import time
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime
 import msgpack
 import numpy as np
 import zlib
-import json
-import random
 
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import udf, count, avg, sum as spark_sum, countDistinct, explode, col, struct, array, lit
+from pyspark.sql.functions import udf, explode, col
 from pyspark.sql.types import (
-    StringType, StructType, StructField, IntegerType, FloatType, 
-    DoubleType, ArrayType, BinaryType
+    StringType, StructType, StructField, IntegerType, 
+    DoubleType, ArrayType
 )
-# Kafka admin imports removed - consumer only processes streams, doesn't manage topics
+# Consumer operates on existing Kafka topics without administrative functions
 
 # Add src directory to path
 project_root = Path(__file__).parent.parent
@@ -34,279 +32,49 @@ src_path = project_root / "src"
 sys.path.append(str(src_path))
 
 from processing.spark_session import create_spark_session
-from bda.bda_processor import process_microbatch_with_bda, format_bda_result_for_output, create_bda_summary_stats
-from bda.bda_config import load_bda_config_with_fallback, get_default_bda_config
+from bda.bda_config import load_bda_config_with_fallback
 from bda.bda_integration import apply_distributed_bda_pipeline
-
-
-# Topic management functions removed - now handled by bootstrap script or producer service
-# This keeps the consumer lightweight and focused on pure streaming processing
-
-
-def deserialize_chunk_data(raw_data_bytes: bytes) -> dict:
-    """
-    Deserialize MessagePack chunk data from Kafka with enhanced logging.
-    
-    Compatible with producer's serialize_chunk() function using matching
-    MessagePack parameters and comprehensive array reconstruction.
-    
-    Parameters
-    ----------
-    raw_data_bytes : bytes
-        Raw MessagePack serialized data from Kafka
-        
-    Returns
-    -------
-    dict
-        Deserialized chunk with numpy arrays reconstructed
-    """
-    
-    try:
-        # Match producer MessagePack parameters: use_bin_type=True, strict_types=False
-        # Consumer equivalent: raw=False, strict_map_key=False  
-        msgpack_data = msgpack.unpackb(raw_data_bytes, raw=False, strict_map_key=False)
-        
-        chunk = {}
-        arrays_processed = 0
-        total_data_size = 0
-        
-        for key, value in msgpack_data.items():
-            if isinstance(value, dict) and 'type' in value:
-                if value['type'] == 'ndarray_compressed':
-                    # Decompress and reconstruct array
-                    try:
-                        decompressed = zlib.decompress(value['data'])
-                        array = np.frombuffer(decompressed, dtype=value['dtype'])
-                        chunk[key] = array.reshape(value['shape'])
-                        arrays_processed += 1
-                        total_data_size += array.nbytes
-                    except Exception as e:
-                        print(f"⚠️  Failed to decompress array '{key}': {e}")
-                        chunk[key] = None
-                        
-                elif value['type'] == 'ndarray':
-                    # Reconstruct array directly
-                    try:
-                        array = np.frombuffer(value['data'], dtype=value['dtype'])
-                        chunk[key] = array.reshape(value['shape'])
-                        arrays_processed += 1 
-                        total_data_size += array.nbytes
-                    except Exception as e:
-                        print(f"⚠️  Failed to reconstruct array '{key}': {e}")
-                        chunk[key] = None
-                else:
-                    # Unknown array type
-                    print(f"⚠️  Unknown array type for '{key}': {value.get('type', 'unknown')}")
-                    chunk[key] = value
-            else:
-                # Non-array data (metadata)
-                chunk[key] = value
-        
-        # Log successful deserialization with details
-        chunk_id = chunk.get('chunk_id', 'unknown')
-        subms_id = chunk.get('subms_id', 'unknown')
-        nrows = chunk.get('nrows', 0)
-        
-        print(f"✅ Deserialized chunk {subms_id}_{chunk_id}: {nrows} rows, {arrays_processed} arrays, {total_data_size/1024:.1f}KB")
-        
-        return chunk
-        
-    except Exception as e:
-        print(f"❌ Error deserializing chunk: {e}")
-        print(f"   Raw data size: {len(raw_data_bytes)} bytes")
-        traceback.print_exc()
-        return {}
-
-
-def decompose_chunk_to_rows(chunk: dict) -> list:
-    """
-    Decompose chunk into individual rows for BDA processing.
-    
-    Converts a chunk containing multiple visibility rows into a list of
-    individual records, each representing one row with its baseline_key
-    and scan_number.
-    
-    Parameters
-    ----------
-    chunk : dict
-        Deserialized chunk with scientific arrays
-        
-    Returns
-    -------
-    list
-        List of individual rows with baseline_key and metadata
-    """
-
-    rows = []
-    
-    try:
-        nrows = chunk.get('nrows', 0)
-        subms_id = chunk.get('subms_id', 'unknown')
-        
-        if nrows == 0:
-            return rows
-            
-        # Extract main arrays
-        antenna1 = chunk.get('antenna1', np.array([]))
-        antenna2 = chunk.get('antenna2', np.array([]))
-        scan_number = chunk.get('scan_number', np.array([]))
-        time_array = chunk.get('time', np.array([]))
-        u_array = chunk.get('u', np.array([]))
-        v_array = chunk.get('v', np.array([]))
-        w_array = chunk.get('w', np.array([]))
-        visibilities = chunk.get('visibilities', np.array([]))
-        weight = chunk.get('weight', np.array([]))
-        flag = chunk.get('flag', np.array([]))
-        
-        # Validate dimensions
-        if len(antenna1) != nrows or len(antenna2) != nrows:
-            print(f"⚠️  Dimension mismatch in chunk {chunk.get('chunk_id', 'unknown')}")
-            return rows
-            
-        # Decompose row by row
-        for row_idx in range(nrows):
-            ant1 = int(antenna1[row_idx]) if len(antenna1) > row_idx else -1
-            ant2 = int(antenna2[row_idx]) if len(antenna2) > row_idx else -1
-            scan_num = int(scan_number[row_idx]) if len(scan_number) > row_idx else -1
-            
-            # Create normalized baseline_key
-            baseline_key = normalize_baseline_key(ant1, ant2, subms_id)
-            
-            # Create individual row record
-            row_record = {
-                # Identifiers for grouping
-                'baseline_key': baseline_key,
-                'scan_number': scan_num,
-                'antenna1': ant1,
-                'antenna2': ant2,
-                'subms_id': subms_id,
-                
-                # Temporal and spatial metadata
-                'time': float(time_array[row_idx]) if len(time_array) > row_idx else 0.0,
-                'u': float(u_array[row_idx]) if len(u_array) > row_idx else 0.0,
-                'v': float(v_array[row_idx]) if len(v_array) > row_idx else 0.0,
-                'w': float(w_array[row_idx]) if len(w_array) > row_idx else 0.0,
-                
-                # Real scientific data for BDA
-                'visibility': visibilities[row_idx] if len(visibilities) > row_idx else np.array([]),
-                'weight': weight[row_idx] if len(weight) > row_idx else np.array([]),
-                'flag': flag[row_idx] if len(flag) > row_idx else np.array([]),
-                
-                # Original chunk metadata
-                'original_chunk_id': chunk.get('chunk_id', -1),
-                'row_index_in_chunk': row_idx,
-                'field_id': chunk.get('field_id', -1),
-                'spw_id': chunk.get('spw_id', -1),
-            }
-            
-            rows.append(row_record)
-            
-    except Exception as e:
-        print(f"❌ Error decomposing chunk: {e}")
-        
-    return rows
-
-
-def group_rows_by_baseline_scan(rows: list) -> dict:
-    """
-    Group individual rows by baseline_key + scan_number.
-    
-    Parameters
-    ----------
-    rows : list
-        List of individual rows decomposed from chunks
-        
-    Returns
-    -------
-    dict
-        Dictionary with group keys (baseline_key, scan_number)
-    """
-    groups = {}
-    
-    for row in rows:
-        baseline_key = row.get('baseline_key', 'unknown')
-        scan_number = row.get('scan_number', -1)
-        
-        # Create group key using consistent function
-        # Extract antenna1, antenna2 from baseline_key if possible
-        if 'antenna1' in row and 'antenna2' in row:
-            ant1 = row['antenna1']
-            ant2 = row['antenna2']
-            subms_id = row.get('subms_id', None)
-            group_key = create_group_key(ant1, ant2, scan_number, subms_id)
-        else:
-            # Fallback to previous method
-            group_key = f"{baseline_key}_scan{scan_number}"
-        
-        if group_key not in groups:
-            groups[group_key] = []
-            
-        groups[group_key].append(row)
-        
-    return groups
-
-
-def log_chunk_summary(chunk_metadata: dict, rows: list) -> None:
-    """
-    Log concise summary with essential chunk information.
-    
-    Parameters
-    ----------
-    chunk_metadata : dict
-        Chunk metadata information
-    rows : list
-        List of processed rows
-    """
-    chunk_id = chunk_metadata.get('chunk_id', 'unknown')
-    subms_id = chunk_metadata.get('subms_id', 'unknown')
-    
-    # Calculate essential statistics
-    unique_baselines = set([row.get('baseline_key', 'unknown') for row in rows])
-    unique_scans = set([row.get('scan_number', -1) for row in rows])
-    times = [row.get('time', 0.0) for row in rows]
-    avg_time = sum(times) / len(times) if times else 0.0
-    
-    print(f"📦 Chunk {subms_id}_{chunk_id}: {len(rows)} rows | {len(unique_baselines)} baselines | {len(unique_scans)} scans | time={avg_time:.1f}")
-
-
-def log_groups_summary(groups: dict) -> None:
-    """
-    Log concise summary of groups by baseline + scan.
-    
-    Parameters
-    ----------
-    groups : dict
-        Dictionary of grouped rows by baseline and scan
-    """
-    total_rows = sum(len(group_rows) for group_rows in groups.values())
-    print(f"� Groups: {len(groups)} | Total rows: {total_rows}")
 
 
 def create_deserialize_to_structs_udf():
     """
-    Create lightweight UDF that deserializes MessagePack to Spark structs (not pandas).
+    Create Spark UDF for MessagePack deserialization to native Spark structures.
     
-    This is a "cheap" deserialization optimized for memory efficiency:
-    - No pandas DataFrames in the critical path
-    - Returns native Spark Row objects
-    - Minimal memory footprint per chunk
+    Creates a User Defined Function that deserializes compressed MessagePack chunks
+    into Spark-native Row objects with proper schema validation. Handles scientific
+    data arrays conversion from binary formats to Spark-compatible types for
+    downstream BDA processing.
     
     Returns
     -------
-    function
-        Spark UDF that returns struct with visibility rows
+    pyspark.sql.functions.udf
+        Spark UDF function that deserializes MessagePack data to structured rows
+        
+    Raises
+    ------
+    Exception
+        UDF handles internal exceptions silently to prevent Spark task failures
     """
     
-    # Define the output schema matching producer's chunk structure
+    # Define Spark schema structure for deserialized visibility data
     visibility_row_schema = StructType([
-        # Metadata fields (match producer exactly)
+        # Chunk metadata fields for data provenance tracking
         StructField("chunk_id", IntegerType(), True),
         StructField("subms_id", StringType(), True), 
         StructField("field_id", IntegerType(), True),
         StructField("spw_id", IntegerType(), True),
         StructField("polarization_id", IntegerType(), True),
         
-        # Baseline and scan identifiers (critical for BDA grouping)
+        # Data range boundaries for chunk validation
+        StructField("row_start", IntegerType(), True),
+        StructField("row_end", IntegerType(), True),
+        StructField("nrows", IntegerType(), True),
+        
+        # Scientific array dimensions for BDA algorithm requirements
+        StructField("n_channels", IntegerType(), True),
+        StructField("n_correlations", IntegerType(), True),
+        
+        # Baseline and scan identifiers for scientific grouping operations
         StructField("antenna1", IntegerType(), True),
         StructField("antenna2", IntegerType(), True),
         StructField("scan_number", IntegerType(), True),
@@ -318,31 +86,42 @@ def create_deserialize_to_structs_udf():
         StructField("v", DoubleType(), True),
         StructField("w", DoubleType(), True),
         
-        # Integration time metadata (critical for BDA)
+        # Integration timing parameters for BDA calculations
         StructField("exposure", DoubleType(), True),
         StructField("interval", DoubleType(), True),
         StructField("integration_time_s", DoubleType(), True),
         
-        # Scientific data arrays (match producer field names exactly)
-        StructField("visibilities", BinaryType(), True),  # Changed from 'visibility_data'
-        StructField("weight", BinaryType(), True),        # Changed from 'weight_data' 
-        StructField("flag", BinaryType(), True)           # Changed from 'flag_data'
+        # Scientific data arrays converted to Spark-native types
+        StructField("visibilities", ArrayType(DoubleType()), True),  # Complex as [real, imag] pairs
+        StructField("weight", ArrayType(DoubleType()), True),        # Weight array as doubles
+        StructField("flag", ArrayType(IntegerType()), True)          # Flag array as 0/1 integers
     ])
     
     rows_array_schema = ArrayType(visibility_row_schema)
     
     def deserialize_chunk_to_rows(raw_data_bytes):
         """
-        Deserialize MessagePack chunk directly to list of Row structs.
+        Deserialize MessagePack chunk into list of visibility row structures.
         
-        Enhanced deserialization with detailed logging and field name matching.
-        Compatible with producer's serialize_chunk() output structure.
+        Processes compressed binary data from Kafka messages, extracts scientific
+        arrays, and converts complex visibility data to Spark-compatible formats.
+        Handles array decompression, type conversion, and baseline key normalization.
+        
+        Parameters
+        ----------
+        raw_data_bytes : bytes
+            Binary MessagePack data from Kafka message
+            
+        Returns
+        -------
+        list
+            List of tuples representing visibility rows with scientific data
         """
         try:
-            # Use matching MessagePack parameters with producer
+            # Deserialize MessagePack data using compatible parameters
             chunk = msgpack.unpackb(raw_data_bytes, raw=False, strict_map_key=False)
             
-            # Extract metadata (match producer field names exactly)
+            # Extract chunk metadata using standard field names
             chunk_id = chunk.get('chunk_id', -1)
             subms_id = chunk.get('subms_id', 'unknown')
             field_id = chunk.get('field_id', -1)
@@ -350,17 +129,18 @@ def create_deserialize_to_structs_udf():
             polarization_id = chunk.get('polarization_id', -1)
             nrows = chunk.get('nrows', 0)
             
-            # Log deserialization attempt
-            print(f"🔍 Deserializing chunk {subms_id}_{chunk_id}: {nrows} rows expected")
+            # Extract data boundaries and array dimensions
+            row_start = chunk.get('row_start', 0)
+            row_end = chunk.get('row_end', nrows)
+            n_channels = chunk.get('n_channels', 0)
+            n_correlations = chunk.get('n_correlations', 0)
             
             if nrows == 0:
-                print(f"⚠️  Empty chunk - no rows to process")
                 return []
             
-            # Enhanced array extraction with detailed logging
+            # Extract and decompress scientific arrays from MessagePack data
             def extract_array(key, expected_length=None):
                 if key not in chunk:
-                    print(f"⚠️  Missing array '{key}' in chunk")
                     return np.array([])
                     
                 value = chunk[key]
@@ -368,31 +148,23 @@ def create_deserialize_to_structs_udf():
                     if isinstance(value, dict) and value.get('type') == 'ndarray_compressed':
                         decompressed = zlib.decompress(value['data'])
                         array = np.frombuffer(decompressed, dtype=value['dtype'])
-                        reconstructed = array.reshape(value['shape'])
-                        print(f"   ✅ Decompressed '{key}': {reconstructed.shape} {reconstructed.dtype}")
-                        return reconstructed
+                        return array.reshape(value['shape'])
                         
                     elif isinstance(value, dict) and value.get('type') == 'ndarray':
                         array = np.frombuffer(value['data'], dtype=value['dtype'])
-                        reconstructed = array.reshape(value['shape'])
-                        print(f"   ✅ Reconstructed '{key}': {reconstructed.shape} {reconstructed.dtype}")
-                        return reconstructed
+                        return array.reshape(value['shape'])
                         
                     elif isinstance(value, (list, np.ndarray)):
-                        # Direct array data
-                        array = np.array(value)
-                        print(f"   ✅ Direct array '{key}': {array.shape} {array.dtype}")
-                        return array
+                        return np.array(value)
                         
                     else:
-                        print(f"   ⚠️  Unknown format for '{key}': {type(value)}")
                         return np.array(value) if hasattr(value, '__iter__') else np.array([])
                         
                 except Exception as e:
-                    print(f"   ❌ Failed to extract '{key}': {e}")
+                    # Handle extraction errors without UDF failure
                     return np.array([])
             
-            # Extract arrays using producer field names
+            # Extract coordinate and metadata arrays from chunk
             antenna1 = extract_array('antenna1', nrows)
             antenna2 = extract_array('antenna2', nrows)
             scan_number = extract_array('scan_number', nrows)
@@ -401,7 +173,7 @@ def create_deserialize_to_structs_udf():
             v_array = extract_array('v', nrows)
             w_array = extract_array('w', nrows)
             
-            # Extract timing metadata
+            # Extract integration timing information
             exposure = extract_array('exposure', nrows)
             interval = extract_array('interval', nrows)
             integration_time_s = chunk.get('integration_time_s', 180.0)  # Scalar value
@@ -411,66 +183,79 @@ def create_deserialize_to_structs_udf():
             weight = extract_array('weight')              # Shape: [nrows, npols] or [nrows, nchans, npols]
             flag = extract_array('flag')                  # Shape: [nrows, nchans, npols]
             
-            # Validation
+            # Validate array dimensions and correct row count
             actual_rows = min(len(antenna1), len(antenna2)) if len(antenna1) > 0 and len(antenna2) > 0 else 0
             if actual_rows != nrows:
-                print(f"⚠️  Row count mismatch: expected {nrows}, got {actual_rows}")
                 nrows = actual_rows
             
             if nrows == 0:
-                print(f"❌ No valid rows after extraction")
                 return []
             
-            # Create rows efficiently
+            # Generate structured rows from extracted arrays
             rows = []
             for i in range(nrows):
                 try:
                     ant1 = int(antenna1[i]) if i < len(antenna1) else -1
                     ant2 = int(antenna2[i]) if i < len(antenna2) else -1
                     
-                    # Create normalized baseline key (consistent with consumer functions)
+                    # Generate normalized baseline identifier for grouping
                     baseline_key = normalize_baseline_key(ant1, ant2, subms_id)
                     
-                    # Extract row-specific scientific data
-                    vis_bytes = visibilities[i].tobytes() if i < len(visibilities) and len(visibilities[i]) > 0 else b''
-                    weight_bytes = weight[i].tobytes() if i < len(weight) and len(weight[i]) > 0 else b''
-                    flag_bytes = flag[i].tobytes() if i < len(flag) and len(flag[i]) > 0 else b''
+                    # Extract scientific arrays for current visibility row
+                    vis_row = visibilities[i] if i < len(visibilities) else np.array([], dtype=np.complex128)
+                    weight_row = weight[i] if i < len(weight) else np.array([], dtype=np.float32)  
+                    flag_row = flag[i] if i < len(flag) else np.array([], dtype=np.bool_)
                     
-                    # Create row tuple matching updated schema
+                    # Convert scientific arrays to Spark-compatible list formats
+                    # Transform complex visibilities to real/imaginary pairs
+                    if vis_row.size > 0:
+                        vis_list = np.stack([vis_row.real, vis_row.imag], axis=-1).flatten().tolist()
+                    else:
+                        vis_list = []
+                    
+                    # Convert weights to double precision list
+                    weight_list = weight_row.astype(np.float64).tolist() if weight_row.size > 0 else []
+                    
+                    # Convert boolean flags to integer list
+                    flag_list = flag_row.astype(np.int32).tolist() if flag_row.size > 0 else []
+                    
+                    # Assemble complete row tuple for Spark schema
                     row = (
                         chunk_id,
                         subms_id,
                         field_id,
                         spw_id,
                         polarization_id,
-                        ant1,
-                        ant2,
-                        int(scan_number[i]) if i < len(scan_number) else -1,
+                        row_start,
+                        row_end,
+                        nrows,
+                        n_channels,
+                        n_correlations,
+                        int(antenna1[i]),
+                        int(antenna2[i]),
+                        int(scan_number[i]),
                         baseline_key,
-                        float(time_array[i]) if i < len(time_array) else 0.0,
-                        float(u_array[i]) if i < len(u_array) else 0.0,
-                        float(v_array[i]) if i < len(v_array) else 0.0,
-                        float(w_array[i]) if i < len(w_array) else 0.0,
-                        float(exposure[i]) if i < len(exposure) else 180.0,
-                        float(interval[i]) if i < len(interval) else 180.0,
+                        float(time_array[i]),
+                        float(u_array[i]),
+                        float(v_array[i]),
+                        float(w_array[i]),
+                        float(exposure[i]),
+                        float(interval[i]),
                         float(integration_time_s),
-                        vis_bytes,      # Match schema: 'visibilities'
-                        weight_bytes,   # Match schema: 'weight'
-                        flag_bytes      # Match schema: 'flag'
+                        vis_list,
+                        weight_list,
+                        flag_list
                     )
                     rows.append(row)
                     
                 except Exception as e:
-                    print(f"   ⚠️  Error creating row {i}: {e}")
                     continue
             
-            print(f"✅ Successfully created {len(rows)} rows from chunk {subms_id}_{chunk_id}")
+            # Return processed rows without logging to prevent UDF overhead
             return rows
             
         except Exception as e:
-            print(f"❌ Critical error in deserialization: {e}")
-            print(f"   Raw data size: {len(raw_data_bytes)} bytes")
-            traceback.print_exc()
+            # Handle deserialization errors without task failure
             return []
     
     return udf(deserialize_chunk_to_rows, rows_array_schema)
@@ -478,44 +263,46 @@ def create_deserialize_to_structs_udf():
 
 def process_streaming_batch_optimized(df, epoch_id, enable_event_time=True, watermark_duration="20 seconds"):
     """
-    ULTRA-OPTIMIZED foreachBatch implementation with clean, structured logging.
+    Process individual microbatch through distributed BDA pipeline.
     
-    Most heavy lifting (deserialization, explode, repartitioning) happens OUTSIDE
-    in the DataFrame pipeline where Spark can optimize it properly.
-    
-    This function now only handles:
-    - BDA processing on pre-processed rows
-    - Clean, structured logging
-    - Error handling
+    Coordinates BDA processing for a single streaming microbatch containing
+    pre-processed visibility data. Loads configuration, validates data,
+    applies distributed baseline-dependent averaging, and provides execution
+    statistics.
     
     Parameters
     ----------
-    df : DataFrame
-        Pre-processed DataFrame with exploded visibility rows, already partitioned by baseline
+    df : pyspark.sql.DataFrame
+        DataFrame containing deserialized visibility rows ready for BDA processing
     epoch_id : int
-        Microbatch epoch ID
-    enable_event_time : bool
-        Whether event-time processing is enabled
-    watermark_duration : str
-        Watermark duration configuration
+        Unique identifier for the current microbatch epoch
+    enable_event_time : bool, optional
+        Whether event-time watermarking is enabled for late data handling, by default True
+    watermark_duration : str, optional
+        Time window for late data tolerance, by default "20 seconds"
+        
+    Raises
+    ------
+    Exception
+        Logs processing errors and continues execution to maintain stream stability
     """
     
     current_time = datetime.now().strftime("%H:%M:%S")
     start_time = time.time()
     
     try:
-        # CLEAN LOGGING: Structured microbatch header
+        # Display structured header for microbatch processing
         print(f"\n{'='*60}")
         print(f"🔄 MICROBATCH {epoch_id:02d} - {current_time}")
         print(f"{'='*60}")
         
-        # Load BDA configuration once
+        # Load BDA configuration for processing parameters
         config_path = str(project_root / "configs" / "bda_config.json")
         bda_config = load_bda_config_with_fallback(config_path)
         
-        # Enhanced logging: Get microbatch statistics
+        # Calculate and display microbatch processing statistics
         try:
-            # Get row count and unique chunks (lightweight Spark actions)
+            # Collect basic statistics using efficient Spark operations
             total_rows = df.count()
             
             if total_rows == 0:
@@ -533,7 +320,7 @@ def process_streaming_batch_optimized(df, epoch_id, enable_event_time=True, wate
             print(f"   • Unique baselines: {unique_baselines}")
             print(f"   • Unique scans: {unique_scans}")
             
-            if chunk_info and len(chunk_info) <= 10:  # Only show details for reasonable number of chunks
+            if chunk_info and len(chunk_info) <= 10:  # Display details for manageable chunk counts
                 print(f"📦 Chunks in this microbatch:")
                 for i, chunk in enumerate(chunk_info, 1):
                     chunk_id = chunk['chunk_id']
@@ -548,19 +335,11 @@ def process_streaming_batch_optimized(df, epoch_id, enable_event_time=True, wate
             print(f"⚠️  Error getting microbatch statistics: {e}")
             print(f"📦 Processing microbatch (details unavailable)")
             print(f"{'─'*60}")
-            # Continue processing despite logging issues
+            # Proceed with BDA processing regardless of statistics errors
         
-        # Apply BDA to pre-processed, partitioned rows
+        # Execute distributed BDA processing on prepared visibility data
         try:
-            # DataFrame at this point contains:
-            # - Deserialized visibility rows (no pandas, memory efficient)
-            # - Exploded from chunks to individual rows  
-            # - Partitioned by baseline_key for balanced load
-            # - Ready for BDA processing (empty batches handled naturally)
-            
-            print("🔧 Applying BDA pipeline...")
-            
-            # Apply BDA pipeline - optimized for throughput
+            # Apply distributed BDA pipeline to processed visibility data
             pipeline_result = apply_distributed_bda_pipeline(
                 df, 
                 bda_config,
@@ -569,10 +348,10 @@ def process_streaming_batch_optimized(df, epoch_id, enable_event_time=True, wate
                 config_file_path="configs/bda_config.json"
             )
             
-            # Calculate processing time
+            # Record BDA processing execution time
             processing_time = (time.time() - start_time) * 1000
             
-            # Clean completion logging
+            # Display successful processing results
             print(f"✅ BDA processing completed successfully")
             print(f"⏱️  Processing time: {processing_time:.0f}ms")
                       
@@ -581,7 +360,7 @@ def process_streaming_batch_optimized(df, epoch_id, enable_event_time=True, wate
             traceback.print_exc()
             return
         
-        # Microbatch completion
+        # Log final microbatch execution summary
         total_time = (time.time() - start_time) * 1000
         print(f"{'─'*60}")
         print(f"🎯 Microbatch {epoch_id:02d} COMPLETED - Total time: {total_time:.0f}ms")
@@ -593,45 +372,6 @@ def process_streaming_batch_optimized(df, epoch_id, enable_event_time=True, wate
         traceback.print_exc()
 
 
-def simulate_distributed_processing(chunk_metadata: dict, partition_id: int) -> float:
-    """
-    Simulate distributed processing work for validation.
-    
-    This function simulates the computational work that would be done
-    in real BDA processing, distributed across different cores.
-    
-    Parameters
-    ----------
-    chunk_metadata : dict
-        Chunk metadata containing array shapes and properties
-    partition_id : int
-        Spark partition ID (maps to core)
-        
-    Returns
-    -------
-    float
-        Simulated processing time in milliseconds
-    """
-    
-    # Simulate work based on data size and partition
-    data_points = 1
-    for key in ['uvw', 'vis', 'weight']:
-        if key in chunk_metadata and 'shape' in chunk_metadata[key]:
-            shape = chunk_metadata[key]['shape']
-            data_points *= max(shape) if shape else 1
-    
-    # Simulate processing time (varies by core/partition)
-    base_time = min(data_points / 100000, 0.1)  # Scale with data size
-    core_variation = (partition_id + 1) * 0.01    # Small variation per core
-    
-    simulated_time = base_time + core_variation + random.uniform(-0.01, 0.01)
-    
-    # Actually consume some CPU time for realism
-    time.sleep(max(simulated_time, 0.001))
-    
-    return simulated_time * 1000  # Return in milliseconds
-
-
 def run_spark_consumer(kafka_servers: str = "localhost:9092", 
                       topic: str = "visibility-stream",
                       config_path: str = None,
@@ -639,42 +379,53 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
                       watermark_duration: str = "20 seconds",
                       max_offsets_per_trigger: int = 200) -> None:
     """
-    Run the Spark streaming consumer with distributed BDA processing.
+    Initialize and run Spark streaming consumer for interferometry data processing.
     
-    This consumer uses distributed processing with Spark UDFs including
-    optimized Kafka to Spark pipeline, distributed deserialization UDF,
-    distributed grouping and aggregation, with watermarks and event time
-    for streaming robustness.
+    Sets up complete streaming pipeline from Kafka consumption through distributed
+    BDA processing. Configures Spark session, creates deserialization UDFs,
+    establishes streaming query with appropriate partitioning and watermarking,
+    and coordinates microbatch processing.
     
     Parameters
     ----------
-    kafka_servers : str
-        Kafka bootstrap servers
-    topic : str
-        Kafka topic name
+    kafka_servers : str, optional
+        Comma-separated list of Kafka bootstrap servers, by default "localhost:9092"
+    topic : str, optional
+        Kafka topic name to consume from, by default "visibility-stream"
     config_path : str, optional
-        Path to configuration file
+        Path to BDA configuration file, by default None
+    enable_event_time : bool, optional
+        Enable event-time processing with watermarks, by default True
+    watermark_duration : str, optional
+        Duration for late data tolerance, by default "20 seconds"
+    max_offsets_per_trigger : int, optional
+        Maximum Kafka offsets processed per trigger, by default 200
+        
+    Raises
+    ------
+    Exception
+        Kafka connection errors, Spark initialization failures, or streaming errors
     """
     
     start_time = datetime.now().strftime("%H:%M:%S")
     
-    print("🚀 BDA Interferometry Consumer - PRODUCTION OPTIMIZED")
+    print("🚀 BDA Interferometry Consumer")
     print("=" * 60)
     print(f"📡 Kafka: {kafka_servers} | Topic: {topic}")
     print(f"⚡ MaxOffsets: {max_offsets_per_trigger} | Event-time: {'ON' if enable_event_time else 'OFF'}")
     print(f"🕐 Started: {start_time}")
     print("=" * 60)
     
-    # Skip Kafka admin - assumes topic exists (managed by producer/bootstrap)
-    print("� Skipping Kafka admin checks - topic managed externally")
-    print("� Ensure topic exists: kafka-topics --create --topic visibility-stream --partitions 4")
+    # Consumer operates on existing Kafka topics without administrative setup
+    print("⚠️  Skipping Kafka admin checks - topic managed externally")
+    print("💡 Ensure topic exists: kafka-topics --create --topic visibility-stream --partitions 4")
     
     # Create Spark session
     print("🔧 Initializing...")
     spark = create_spark_session(config_path)
     
     try:
-        # Create lightweight deserializer UDF (no pandas!)
+        # Initialize memory-efficient MessagePack deserializer
         deserialize_to_structs_udf = create_deserialize_to_structs_udf()
         kafka_df = spark \
             .readStream \
@@ -686,7 +437,7 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
             .option("maxOffsetsPerTrigger", str(max_offsets_per_trigger)) \
             .load()
         
-        # Step 1: Basic DataFrame with event-time if needed
+        # Configure Kafka DataFrame with optional event-time processing
         if enable_event_time:
             kafka_processed = kafka_df.select(
                 kafka_df.key.cast("string").alias("message_key"),
@@ -701,14 +452,13 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
                 kafka_df.timestamp.alias("kafka_timestamp")
             )
         
-        # Step 2: Deserialize chunks to rows
+        # Apply MessagePack deserialization to extract visibility rows
         chunks_with_rows = kafka_processed.withColumn(
             "visibility_rows", 
             deserialize_to_structs_udf(col("chunk_data"))
         )
         
-        # Step 3: Explode chunks to individual rows
-        # Step 3: Explode chunks to individual rows with updated field names
+        # Expand chunk arrays into individual visibility rows
         rows_df = chunks_with_rows.select(
             col("message_key"),
             col("kafka_timestamp"),
@@ -724,13 +474,20 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
             col("row.field_id").alias("field_id"),
             col("row.spw_id").alias("spw_id"),
             col("row.polarization_id").alias("polarization_id"),
+            
+            # Data boundaries and array dimensions for BDA processing
+            col("row.row_start").alias("row_start"),
+            col("row.row_end").alias("row_end"),
+            col("row.nrows").alias("nrows"),
+            col("row.n_channels").alias("n_channels"),
+            col("row.n_correlations").alias("n_correlations"),
             # Baseline and scan identifiers
             col("row.antenna1").alias("antenna1"),
             col("row.antenna2").alias("antenna2"),
             col("row.scan_number").alias("scan_number"),
             col("row.baseline_key").alias("baseline_key"),
             # Temporal and spatial metadata
-            col("row.time").alias("vis_time"),
+            col("row.time").alias("time"),
             col("row.u").alias("u"),
             col("row.v").alias("v"), 
             col("row.w").alias("w"),
@@ -738,26 +495,26 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
             col("row.exposure").alias("exposure"),
             col("row.interval").alias("interval"),
             col("row.integration_time_s").alias("integration_time_s"),
-            # Scientific data (corrected field names)
-            col("row.visibilities").alias("visibilities"),  # Corrected from 'visibility_data'
-            col("row.weight").alias("weight"),              # Corrected from 'weight_data'
-            col("row.flag").alias("flag")                   # Corrected from 'flag_data'
+            # Scientific arrays converted to Spark-native data types
+            col("row.visibilities").alias("visibilities"),  # Complex as [real, imag] pairs list
+            col("row.weight").alias("weight"),              # Weights as float list
+            col("row.flag").alias("flag")                   # Flags as 0/1 integer list
         )
         
-        # Step 4: Partition by baseline for optimal processing
+        # Repartition data by baseline for efficient distributed processing
         processed_df = rows_df.repartition(4, col("baseline_key"))
         
-        # Create processing function with configuration
+        # Define microbatch processing function with stream parameters
         def process_batch_with_config(df, epoch_id):
             return process_streaming_batch_optimized(
                 df, epoch_id, enable_event_time, watermark_duration
             )
         
-        # Generate unique checkpoint per execution to avoid state conflicts when changing config
+        # Create unique checkpoint directory for streaming state management
         import uuid
         checkpoint_path = f"/tmp/spark-bda-{uuid.uuid4().hex[:8]}-{int(time.time())}"
         
-        # Start streaming query
+        # Initialize and start Spark streaming query
         query = processed_df.writeStream \
             .foreachBatch(process_batch_with_config) \
             .outputMode("append") \
@@ -769,10 +526,10 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
         print("🔄 Microbatches every 10s | Ctrl+C to stop")
         print("=" * 60)
         
-        # Wait for termination (clean monitoring without interfering with microbatch logs)
+        # Monitor streaming execution and handle termination
         try:
             while query.isActive:
-                time.sleep(10)  # Sleep for microbatch intervals
+                time.sleep(10)  # Wait between monitoring cycles
                     
         except KeyboardInterrupt:
             print("\n🛑 Stopping...")
@@ -794,60 +551,45 @@ def run_spark_consumer(kafka_servers: str = "localhost:9092",
 
 def normalize_baseline_key(antenna1: int, antenna2: int, subms_id: str = None) -> str:
     """
-    Normalize baseline key for consistency between consumer and BDA.
+    Generate normalized baseline identifier for consistent grouping operations.
     
-    Ensures that (1,3) and (3,1) generate the same key, and optionally
-    includes subms_id to distinguish different SubMS.
+    Creates standardized baseline key by ordering antenna IDs to ensure
+    bidirectional baselines produce identical keys for proper scientific
+    grouping in BDA processing.
     
     Parameters
     ----------
     antenna1 : int
-        First antenna of the baseline
+        First antenna identifier in baseline pair
     antenna2 : int
-        Second antenna of the baseline  
+        Second antenna identifier in baseline pair
     subms_id : str, optional
-        SubMS ID to distinguish between different partitions
+        SubMS identifier for multi-dataset discrimination, by default None
         
     Returns
     -------
     str
-        Normalized baseline key
+        Normalized baseline key in format "min_antenna-max_antenna"
     """
-    # Normalize order: always min-max
+    # Order antennas by ID to ensure consistent baseline representation
     ant_min, ant_max = sorted([antenna1, antenna2])
     
-    if subms_id:
-        return f"{ant_min}-{ant_max}-{subms_id}"
-    else:
-        return f"{ant_min}-{ant_max}"
-
-
-def create_group_key(antenna1: int, antenna2: int, scan_number: int, subms_id: str = None) -> str:
-    """
-    Create consistent group key for (baseline, scan_number).
-    
-    Parameters
-    ----------
-    antenna1 : int
-        First antenna
-    antenna2 : int
-        Second antenna
-    scan_number : int
-        Scan number
-    subms_id : str, optional
-        SubMS ID
-        
-    Returns
-    -------
-    str
-        Normalized group key
-    """
-    baseline_key = normalize_baseline_key(antenna1, antenna2, subms_id)
-    return f"{baseline_key}_scan{scan_number}"
+    return f"{ant_min}-{ant_max}"
 
 
 def main():
-    """Main entry point for Spark consumer service."""
+    """
+    Command-line entry point for interferometry data consumer service.
+    
+    Parses command-line arguments and initializes Spark streaming consumer
+    with specified configuration parameters for Kafka connectivity,
+    BDA processing options, and stream management settings.
+    
+    Raises
+    ------
+    SystemExit
+        Fatal configuration or initialization errors
+    """
     
     parser = argparse.ArgumentParser(
         description="BDA Interferometry Spark Consumer Service",

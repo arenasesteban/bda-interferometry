@@ -21,12 +21,10 @@ from .producer_service import (
 
 # Consumer functions  
 from .consumer_service import (
-    run_consumer_service,
-    create_kafka_consumer,
-    consume_chunks_from_kafka,
-    validate_chunk_structure,
-    process_chunk,
-    deserialize_chunk
+    run_spark_consumer,
+    create_deserialize_to_structs_udf,
+    process_streaming_batch_optimized,
+    normalize_baseline_key
 )
 
 __all__ = [
@@ -37,11 +35,8 @@ __all__ = [
     'serialize_chunk',
     
     # Consumer functions
-    'run_consumer_service',
-    'process_chunks_with_validation',
-    'create_kafka_consumer',
-    'consume_chunks_from_kafka', 
-    'validate_chunk_structure',
-    'process_chunk',
-    'deserialize_chunk'
+    'run_spark_consumer',
+    'create_deserialize_to_structs_udf',
+    'process_streaming_batch_optimized',
+    'normalize_baseline_key'
 ]
