@@ -40,17 +40,21 @@ def create_spark_session(config_path: str = None) -> SparkSession:
     """
     config = load_config(config_path)
     
-    # Create session with optimized configurations (OPCIÓN A - Memory conservative)
+    # Create session with optimized configurations - MEMORY & PERFORMANCE OPTIMIZED
     spark = SparkSession.builder \
         .appName(config["spark"]["app_name"]) \
         .master(config["spark"]["master"]) \
         .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0") \
         .config("spark.sql.shuffle.partitions", "4") \
-        .config("spark.sql.adaptive.enabled", "false") \
-        .config("spark.sql.adaptive.coalescePartitions.enabled", "false") \
+        .config("spark.sql.adaptive.enabled", "true") \
+        .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+        .config("spark.sql.adaptive.skewJoin.enabled", "true") \
         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
-        .config("spark.driver.memory", "4g") \
+        .config("spark.driver.memory", "3g") \
+        .config("spark.executor.memory", "2g") \
         .config("spark.python.worker.reuse", "true") \
+        .config("spark.sql.execution.arrow.pyspark.enabled", "false") \
+        .config("spark.sql.execution.arrow.pyspark.fallback.enabled", "false") \
         .getOrCreate()
     
     # Reduce logging verbosity
@@ -102,126 +106,3 @@ def load_config(config_path: str = None) -> Dict[str, Any]:
             print(f"Warning: Could not load config {config_path}: {e}")
     
     return default_config
-
-
-def get_kafka_options(config: Dict[str, Any]) -> Dict[str, str]:
-    """
-    Extracts Kafka connection options for Spark streaming configuration.
-    
-    Converts configuration dictionary into Spark-compatible Kafka options
-    for structured streaming data source configuration.
-    
-    Parameters
-    ----------
-    config : Dict[str, Any]
-        Configuration dictionary containing Kafka settings
-        
-    Returns
-    -------
-    Dict[str, str]
-        Kafka options formatted for Spark streaming
-    """
-    kafka_config = config["kafka"]
-    
-    return {
-        "kafka.bootstrap.servers": kafka_config["servers"],
-        "subscribe": kafka_config["topic"],
-        "startingOffsets": "latest"
-    }
-
-
-def get_visibility_row_schema() -> StructType:
-    """
-    Defines Spark schema for individual visibility rows after chunk expansion.
-    
-    Creates structured schema matching expanded visibility data format
-    with baseline identifiers, coordinates, scientific arrays, and metadata
-    for distributed BDA processing compatibility.
-    
-    Returns
-    -------
-    StructType
-        Spark schema definition for visibility row structure
-    """
-    return StructType([
-        # Grouping identifiers
-        StructField("baseline_key", StringType(), False),
-        StructField("scan_number", IntegerType(), False),
-        StructField("antenna1", IntegerType(), False),
-        StructField("antenna2", IntegerType(), False),
-        StructField("subms_id", StringType(), True),
-        
-        # Temporal and spatial metadata  
-        StructField("time", FloatType(), False),
-        StructField("u", FloatType(), False),
-        StructField("v", FloatType(), False),
-        StructField("w", FloatType(), False),
-        
-        # Scientific data arrays (as JSON strings for now, will be parsed in UDFs)
-        StructField("visibility_json", StringType(), False),
-        StructField("weight_json", StringType(), False),
-        StructField("flag_json", StringType(), False),
-        
-        # Original chunk metadata
-        StructField("original_chunk_id", IntegerType(), True),
-        StructField("row_index_in_chunk", IntegerType(), False),
-        StructField("field_id", IntegerType(), True),
-        StructField("spw_id", IntegerType(), True),
-    ])
-
-
-def get_grouped_visibility_schema() -> StructType:
-    """
-    Defines Spark schema for grouped visibility data by baseline and scan.
-    
-    Creates schema structure for visibility data grouped by baseline-scan
-    combinations, containing group metadata and arrays of visibility rows
-    for distributed BDA processing operations.
-    
-    Returns
-    -------
-    StructType
-        Spark schema definition for grouped visibility structure
-    """
-    return StructType([
-        StructField("group_key", StringType(), False),
-        StructField("baseline_key", StringType(), False),
-        StructField("scan_number", IntegerType(), False),
-        StructField("antenna1", IntegerType(), False),
-        StructField("antenna2", IntegerType(), False),
-        StructField("row_count", IntegerType(), False),
-        StructField("visibility_rows", ArrayType(get_visibility_row_schema()), False),
-    ])
-
-
-def get_bda_result_schema() -> StructType:
-    """
-    Defines Spark schema for BDA processing output results.
-    
-    Creates schema structure for averaged visibility data output from
-    BDA algorithms, including averaged arrays, coordinates, timing
-    metadata, and compression statistics for result consistency.
-    
-    Returns
-    -------
-    StructType
-        Spark schema definition for BDA processing results
-    """
-    return StructType([
-        StructField("visibility_averaged_json", StringType(), False),
-        StructField("weight_total_json", StringType(), False),
-        StructField("flag_combined_json", StringType(), False),
-        StructField("u_avg", FloatType(), False),
-        StructField("v_avg", FloatType(), False),
-        StructField("w_avg", FloatType(), False),
-        StructField("time_avg", FloatType(), False),
-        StructField("n_input_rows", IntegerType(), False),
-        StructField("window_dt_s", FloatType(), False),
-        StructField("baseline_length", FloatType(), False),
-        StructField("delta_t_max", FloatType(), False),
-        StructField("antenna1", IntegerType(), False),
-        StructField("antenna2", IntegerType(), False),
-        StructField("scan_number", IntegerType(), False),
-        StructField("group_key_str", StringType(), True),
-        StructField("input_rows_count", IntegerType(), True),
-    ])
