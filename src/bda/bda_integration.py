@@ -1,53 +1,57 @@
 """
-BDA Integration - Distributed BDA Pipeline Orchestration
+BDA Integration - Incremental Streaming BDA Pipeline Orchestration
 
-This module orchestrates the distributed BDA (Baseline-Dependent Averaging) pipeline
-using Apache Spark. It coordinates distributed grouping, applies BDA processing through
-Pandas UDFs, and aggregates results with comprehensive performance metrics.
+This module orchestrates the incremental BDA (Baseline-Dependent Averaging)        results_data = [{
+            'result_type': 'incremental_streaming_bda',
+            'processing_status': 'bda_completed_streaming',
+            'total_bda_windows': total_windows,
+            'total_input_rows': total_input_rows,
+            'unique_groups_processed': unique_groups,
+            'sample_baseline_keys': min(unique_groups, 10),  # Estimation without collect()
+            'sample_avg_compression': avg_compression_ratio,  # Use already calculated value
+            'processing_mode': 'incremental_streaming_windows'
+        }]using Apache Spark's mapPartitions. It processes visibility data in decorrelation-time
+windows for memory-efficient streaming with constant RAM usage.
 
-The module works with data already prepared by the consumer service, focusing exclusively
-on distributed processing orchestration and scientific result aggregation.
+The module uses online window closure based on physical decorrelation criteria,
+eliminating the need to accumulate full baselines in memory.
 
 Key Functions
 -------------
-apply_distributed_bda_pipeline : Main orchestration function for distributed BDA processing
-create_distributed_bda_group_processor : Creates Pandas UDF for group-level BDA processing
+apply_distributed_bda_pipeline : Main orchestration function for incremental streaming BDA
+convert_bda_result_to_spark_tuple : Converts streaming window results to Spark format
 """
 
 import time
 import logging
 import traceback
 import numpy as np
-import pandas as pd
-
 from pyspark.sql.functions import (
-    explode, col, count, sum as spark_sum, avg, max as spark_max, 
-    pandas_udf, udf
+    explode, col, count, sum as spark_sum, avg, max as spark_max, countDistinct
 )
-from pyspark.sql.pandas.functions import PandasUDFType
 from pyspark.sql.types import (
     StructType, StructField, StringType, IntegerType, FloatType, 
     DoubleType, ArrayType
 )
 
-from .bda_processor import process_group_with_bda
+from .bda_processor import process_rows_incrementally
 
 
 def apply_distributed_bda_pipeline(df, bda_config, enable_event_time=False, 
                                   watermark_duration="2 minutes", config_file_path=None):
     """
-    Execute distributed BDA pipeline with complete scientific processing orchestration.
+    Execute incremental streaming BDA pipeline with decorrelation windows.
     
-    Coordinates the full distributed BDA workflow using Spark for optimal performance.
-    Groups visibility data by baseline and scan, applies BDA algorithms through Pandas UDFs,
-    and generates comprehensive processing statistics and results.
+    Memory-efficient approach using online window processing with Spark mapPartitions.
+    Processes visibility data in small windows based on decorrelation time rather 
+    than accumulating entire baselines in memory. Maintains constant RAM usage.
     
     Parameters
     ----------
     df : pyspark.sql.DataFrame
         Spark DataFrame containing visibility data prepared by consumer service
     bda_config : dict
-        BDA configuration parameters including decorrelation factors and frequency settings
+        BDA configuration parameters including decorrelation time settings
     enable_event_time : bool, optional
         Enable watermarking for streaming data processing (default: False)
     watermark_duration : str, optional
@@ -58,54 +62,64 @@ def apply_distributed_bda_pipeline(df, bda_config, enable_event_time=False,
     Returns
     -------
     dict
-        Complete BDA processing results with DataFrames, KPIs, and configuration metadata
-        Contains 'results', 'kpis', 'config', and 'spark_config' keys
+        Incremental BDA processing results with streaming window statistics
+        Contains 'results', 'kpis', 'config' keys and streaming metadata
         
     Raises
     ------
     Exception
-        If distributed processing fails, returns safe fallback with empty results
+        If incremental processing fails, returns safe fallback with empty results
     """
     logger = logging.getLogger(__name__)
     
-    logger.info("Starting distributed BDA orchestration pipeline")
-    logger.info("Using data already prepared by consumer service")
-    logger.info("Applying distributed BDA processing with Pandas UDFs") 
-    logger.info("Executing Spark pipeline: groupBy → applyInPandas")
-    logger.info("Computing final distributed aggregations")
+    logger.info("🚀 Starting incremental BDA pipeline")
+    logger.info("📊 Processing mode: streaming windows (mapPartitions)")
+    logger.info("🧠 Memory usage: constant per window (not per baseline)")
     
     try:
+        
         # Use scientific data prepared by consumer service
         logger.info("Using scientific data already prepared by consumer service...")
-        
-        # DataFrame contains prepared columns: visibility, weight, flag, u, v, w, time, etc.
         scientific_df = df
         
-        logger.info("Ready to process scientific data from consumer")
+        logger.info("Ready to process scientific data with incremental BDA")
         
         # Watermarking for streaming
         if enable_event_time:
             logger.info(f"Applying watermark for late data: {watermark_duration}")
-            scientific_df = scientific_df.withWatermark("time", watermark_duration)
+            scientific_df = scientific_df.withWatermark("time_timestamp", watermark_duration)
         else:
             logger.info("Watermarking disabled")
         
-        # Distributed grouping
-        logger.info("Distributed grouping by (antenna1, antenna2, scan_number)...")
+        # Partition by baseline for streaming efficiency
+        logger.info("Partitioning data for incremental BDA processing...")
+        # Optimal partitioning: 4 partitions for 4 cores, grouped by baseline
+        scientific_df_partitioned = scientific_df.repartition(4, col("antenna1"), col("antenna2"), col("scan_number"))
         
-        # Group data by baseline (antenna pair) and scan number for distributed processing
-        grouped_df = scientific_df.groupBy("antenna1", "antenna2", "scan_number")
+        # Sort within partitions by time (maintains temporal order for decorrelation windows)
+        sorted_df = scientific_df_partitioned.sortWithinPartitions("time")
         
-        logger.info("Grouping by baseline+scan configured")
+        logger.info("Applying incremental BDA with decorrelation windows...")
         
-        # Distributed BDA per group
-        logger.info("Applying distributed BDA with Pandas UDFs...")
+        # Define incremental BDA processing function
+        def incremental_bda_partition(partition_iterator):
+            """Process partition with incremental BDA windows - memory efficient"""
+            results = []
+            
+            # FIXED: partition_iterator already yields Row objects directly
+            # No need for nested generator - use partition_iterator as row iterator
+            for bda_result in process_rows_incrementally(partition_iterator, bda_config):
+                result_tuple = convert_bda_result_to_spark_tuple(bda_result)
+                results.append(result_tuple)
+            
+            return iter(results)
         
-        # Create distributed BDA UDF
-        bda_group_udf = create_distributed_bda_group_processor(bda_config)
+        logger.info("Executing incremental BDA processing...")
+        bda_results_rdd = sorted_df.rdd.mapPartitions(incremental_bda_partition)
         
-        # Apply distributed BDA to each group
-        bda_results_df = grouped_df.apply(bda_group_udf)
+        # Create DataFrame from RDD with proper schema
+        spark_session = df.sparkSession
+        bda_results_df = spark_session.createDataFrame(bda_results_rdd, get_bda_result_schema())
         
         logger.info("Distributed BDA applied to all groups")
         
@@ -119,7 +133,7 @@ def apply_distributed_bda_pipeline(df, bda_config, enable_event_time=False,
                          spark_sum(col("n_input_rows").cast("integer")).alias("total_input_rows"),
                          avg(col("compression_ratio").cast("double")).alias("avg_compression_ratio"),
                          spark_max(col("compression_ratio").cast("double")).alias("max_compression_ratio"),
-                         count("group_key").alias("unique_groups_processed"),
+                         countDistinct("group_key").alias("unique_groups_processed"),
                          avg(col("window_duration_s").cast("double")).alias("avg_window_duration_s"),
                          spark_max("processing_timestamp").alias("last_processing_time")
                      )
@@ -145,7 +159,7 @@ def apply_distributed_bda_pipeline(df, bda_config, enable_event_time=False,
             'unique_groups_processed': unique_groups,
             'sample_baseline_keys': min(unique_groups, 10),  # Estimation without collect()
             'sample_avg_compression': avg_compression_ratio,  # Use already calculated value
-            'processing_mode': 'distributed_pandas_udf_bda'
+            'processing_mode': 'incremental_streaming_windows'
         }]
         
         spark_session = df.sparkSession
@@ -162,28 +176,28 @@ def apply_distributed_bda_pipeline(df, bda_config, enable_event_time=False,
         kpis_df = spark_session.createDataFrame(kpis_data, get_kpis_schema())
         
         # Final result
-        logger.info(f"DISTRIBUTED BDA PIPELINE COMPLETED")
+        logger.info(f"INCREMENTAL BDA PIPELINE COMPLETED")
         logger.info(f"   Input rows: {total_input_rows}")
         logger.info(f"   BDA windows: {total_windows}")
         logger.info(f"   Average compression: {avg_compression_ratio:.2f}:1")
         logger.info(f"   Maximum compression: {max_compression_ratio:.2f}:1")
         logger.info(f"   Groups processed: {unique_groups}")
         logger.info(f"   Average window duration: {avg_window_duration:.2f}s")
-        logger.info(f"   Mode: FULLY DISTRIBUTED")
+        logger.info(f"   Mode: INCREMENTAL WINDOWS")
         
         return {
             'results': bda_results_df,  # Complete DataFrame with BDA results
             'kpis': kpis_df,
             'config': bda_config,
             'spark_config': {
-                'mode': 'fully_distributed_bda',
+                'mode': 'incremental_streaming_bda',
                 'total_input_rows': int(total_input_rows),
                 'total_bda_windows': int(total_windows),
                 'unique_groups_processed': int(unique_groups),
                 'avg_compression_ratio': float(avg_compression_ratio),
                 'max_compression_ratio': float(max_compression_ratio),
-                'pipeline_status': 'complete_distributed_bda_pipeline',
-                'architecture': 'spark_pandas_udf_groupby_applyinpandas'
+                'pipeline_status': 'complete_incremental_bda_pipeline',
+                'architecture': 'spark_mappartitions_decorrelation_windows'
             }
         }
         
@@ -206,7 +220,7 @@ def apply_distributed_bda_pipeline(df, bda_config, enable_event_time=False,
             'results': empty_results_df,
             'kpis': empty_kpis_df,
             'config': bda_config,
-            'spark_config': {'mode': 'error_fallback', 'error': str(e)}
+            'spark_config': {'mode': 'incremental_streaming_error', 'error': str(e)}
         }
 
 
@@ -322,447 +336,53 @@ def get_final_bda_results_schema():
     ])
 
 
-def create_distributed_bda_group_processor(bda_config: dict):
+def convert_bda_result_to_spark_tuple(bda_result):
     """
-    Create Pandas UDF for distributed BDA processing by baseline groups.
+    Convert BDA result dictionary to Spark DataFrame tuple.
     
-    Generates a Spark Pandas UDF that applies BDA algorithms to individual
-    baseline-scan groups on distributed workers. Each group is processed
-    independently using scientific BDA algorithms.
-    
-    Parameters
-    ----------
-    bda_config : dict
-        BDA configuration parameters including frequency and decorrelation settings
-        
-    Returns
-    -------
-    function
-        Pandas UDF function for distributed group-level BDA processing
+    Transforms incremental BDA window results to format compatible
+    with Spark schema for distributed DataFrame creation.
     """
+    import time
     
-    @pandas_udf(returnType=get_bda_result_schema(), functionType=PandasUDFType.GROUPED_MAP)
-    def bda_group_processor(group_df):
-        """
-        Processes a group (baseline, scan) with BDA on distributed worker.
-        
-        This function executes on each Spark worker and applies BDA to a specific
-        group of visibilities using existing scientific functions.
-        
-        Parameters
-        ----------
-        group_df : pd.DataFrame
-            Pandas DataFrame with all group rows
-            
-        Returns
-        -------
-        pd.DataFrame
-            DataFrame with BDA results for the group
-        """
-        start_time = time.time()
-        
-        try:
-            if group_df.empty:
-                return create_empty_bda_result()
-            
-            # Extract group information
-            first_row = group_df.iloc[0]
-            baseline_key = first_row['baseline_key']
-            scan_number = first_row['scan_number']
-            antenna1 = first_row['antenna1']
-            antenna2 = first_row['antenna2']
-            
-            # Create group_key from baseline and scan information
-            group_key = f"{baseline_key}_scan{scan_number}"
-            
-            # Logging moved to debug level to avoid spam in production
-            logging.debug(f"Processing BDA group: {group_key} ({len(group_df)} rows)")
-            
-            # Convert pandas DataFrame to BDA-compatible format
-            visibility_rows = convert_pandas_to_bda_format(group_df)
-            
-            # Apply existing BDA logic
-            try:
-                # Use existing BDA processor function (now works on pre-grouped data)
-                bda_results = process_group_with_bda(visibility_rows, bda_config)
-                
-                if not bda_results:
-                    # Fallback: create result without averaging
-                    return create_fallback_bda_result_df(group_key, baseline_key, scan_number, antenna1, antenna2, len(group_df))
-                
-            except Exception as e:
-                logging.warning(f"BDA processing failed for {group_key}: {e}")
-                return create_fallback_bda_result_df(group_key, baseline_key, scan_number, antenna1, antenna2, len(group_df))
-            
-            # Convert BDA results to Spark format
-            spark_results = convert_bda_results_to_spark(
-                bda_results, group_key, baseline_key, scan_number, 
-                antenna1, antenna2, len(group_df), start_time
-            )
-            
-            processing_time = (time.time() - start_time) * 1000
-            logging.debug(f"BDA group {group_key} completed in {processing_time:.1f}ms")
-            
-            return spark_results
-            
-        except Exception as e:
-            logging.error(f"Error processing BDA group: {e}")
-            return create_error_bda_result(e, group_key if 'group_key' in locals() else 'unknown')
+    # Convert complex arrays to interleaved real/imag format for Spark
+    vis_avg = bda_result.get('visibility_averaged', np.array([]))
+    if vis_avg.size > 0:
+        vis_flat = vis_avg.flatten()
+        vis_real_imag = np.stack([vis_flat.real, vis_flat.imag], axis=-1)
+        vis_list = vis_real_imag.flatten().tolist()
+    else:
+        vis_list = []
     
-    return bda_group_processor
-
-
-def convert_pandas_to_bda_format(group_df) -> list:
-    """
-    Convert pandas DataFrame to BDA processor compatible format.
+    weight_list = bda_result.get('weight_total', np.array([])).flatten().tolist()
+    flag_list = bda_result.get('flag_combined', np.array([])).flatten().astype(int).tolist()
     
-    Transforms visibility data from pandas DataFrame rows to the dictionary
-    format required by BDA processing functions. Handles conversion of
-    Spark arrays to numpy arrays and ensures proper data types.
+    baseline_key = bda_result.get('group_key', (0, 0, 0))
     
-    Parameters
-    ----------
-    group_df : pd.DataFrame
-        Pandas DataFrame containing visibility data for a single group
+    return (
+        str(baseline_key),                                    # group_key
+        f"{baseline_key[0]}-{baseline_key[1]}",              # baseline_key
+        int(baseline_key[2]),                                # scan_number
+        int(baseline_key[0]),                                # antenna1
+        int(baseline_key[1]),                                # antenna2
         
-    Returns
-    -------
-    list of dict
-        List of dictionaries with numpy arrays compatible with BDA processor
+        float(bda_result.get('time_avg', 0.0)),              # time_avg
+        float(bda_result.get('u_avg', 0.0)),                 # u_avg
+        float(bda_result.get('v_avg', 0.0)),                 # v_avg
+        float(bda_result.get('w_avg', 0.0)),                 # w_avg
+        float(np.sqrt(bda_result.get('u_avg', 0.0)**2 + 
+                     bda_result.get('v_avg', 0.0)**2 + 
+                     bda_result.get('w_avg', 0.0)**2)),      # baseline_length
         
-    Raises
-    ------
-    Exception
-        If data conversion fails or required columns are missing
-    """
-    rows = []
-    
-    try:
-        for idx, row in group_df.iterrows():
-            # Extract visibility data arrays from Spark DataFrame rows
-            # Convert Spark list format to numpy arrays for BDA processing
-            vis_list = row.get('visibilities', [])  # Note: column name is 'visibilities' (plural)
-            weight_list = row.get('weight', [])
-            flag_list = row.get('flag', [])
-            
-            # Get expected dimensions from DataFrame metadata
-            n_channels = int(row.get('n_channels', 1))
-            n_correlations = int(row.get('n_correlations', 1))
-            
-            # Handle None values and ensure we have valid lists
-            if vis_list is None:
-                vis_list = []
-            if weight_list is None:
-                weight_list = []
-            if flag_list is None:
-                flag_list = []
-                
-            # Ensure we have valid data types (convert from numpy if needed)
-            if hasattr(vis_list, 'tolist'):
-                vis_list = vis_list.tolist()
-            if hasattr(weight_list, 'tolist'):
-                weight_list = weight_list.tolist()
-            if hasattr(flag_list, 'tolist'):
-                flag_list = flag_list.tolist()
-            
-            # Convert list data to numpy arrays with appropriate types
-            # Complex visibility data expected as [real, imag, real, imag, ...] format
-            try:
-                vis_array = np.array(vis_list, dtype=complex) if len(vis_list) > 0 else np.array([0+0j])
-                weight_array = np.array(weight_list, dtype=float) if len(weight_list) > 0 else np.array([1.0])
-                flag_array = np.array(flag_list, dtype=bool) if len(flag_list) > 0 else np.array([False])
-            except Exception as array_error:
-                logging.warning(f"Array conversion error: {array_error}, using defaults")
-                vis_array = np.array([0+0j])
-                weight_array = np.array([1.0])
-                flag_array = np.array([False])
-            
-            # Reshape arrays to [nchans, npols] format using metadata dimensions
-            # This ensures consistent shapes across all rows in the group
-            try:
-                expected_shape = (n_channels, n_correlations)
-                
-                # Reshape or pad/truncate arrays to expected dimensions
-                vis_array = np.resize(vis_array, expected_shape).astype(complex)
-                weight_array = np.resize(weight_array, expected_shape).astype(float)
-                flag_array = np.resize(flag_array, expected_shape).astype(bool)
-                
-            except Exception as reshape_error:
-                logging.warning(f"Array reshape error: {reshape_error}, using fallback reshape")
-                # Fallback to simple reshape
-                if vis_array.ndim == 1:
-                    vis_array = vis_array.reshape(-1, 1)
-                if weight_array.ndim == 1:
-                    weight_array = weight_array.reshape(-1, 1)
-                if flag_array.ndim == 1:
-                    flag_array = flag_array.reshape(-1, 1)
-            
-            # Create row dictionary with format expected by BDA processor
-            bda_row = {
-                'antenna1': int(row.get('antenna1', 0)),
-                'antenna2': int(row.get('antenna2', 0)),
-                'scan_number': int(row.get('scan_number', 0)),
-                'time': float(row.get('time', 0.0)),
-                'u': float(row.get('u', 0.0)),
-                'v': float(row.get('v', 0.0)),
-                'w': float(row.get('w', 0.0)),
-                'visibility': vis_array,
-                'weight': weight_array,
-                'flag': flag_array,
-            }
-            
-            rows.append(bda_row)
-            
-    except Exception as e:
-        logging.error(f"Error converting pandas to BDA format: {e}")
+        vis_list,                                            # visibility_avg
+        weight_list,                                         # weight_total
+        flag_list,                                           # flag_combined
         
-    return rows
-
-
-def convert_bda_results_to_spark(bda_results, group_key, baseline_key, scan_number, 
-                                antenna1, antenna2, input_rows, start_time):
-    """
-    Convert BDA processing results to Spark-compatible DataFrame format.
-    
-    Transforms BDA algorithm outputs to pandas DataFrame with proper schema
-    for Spark distributed processing. Handles complex visibility data conversion
-    and computes processing statistics.
-    
-    Parameters  
-    ----------
-    bda_results : list
-        BDA processing results containing averaged visibilities and metadata
-    group_key : str
-        Unique identifier for the baseline-scan group
-    baseline_key : str
-        Baseline identifier (antenna pair)
-    scan_number : int
-        Observation scan number
-    antenna1, antenna2 : int
-        Baseline antenna pair identifiers
-    input_rows : int
-        Number of input visibility rows processed
-    start_time : float
-        Processing start timestamp for performance metrics
-        
-    Returns
-    -------
-    pd.DataFrame
-        Pandas DataFrame with BDA results compatible with Spark schema
-        
-    Raises
-    ------
-    Exception
-        If result conversion fails, returns fallback DataFrame
-    """
-    
-    try:
-        if not bda_results:
-            return create_fallback_bda_result_df(
-                group_key, baseline_key, scan_number, antenna1, antenna2, input_rows
-            )
-        
-        # Take first BDA result (may have multiple windows)
-        result = bda_results[0] if isinstance(bda_results, list) else bda_results
-        
-        # Calculate statistics
-        n_windows = len(bda_results) if isinstance(bda_results, list) else 1
-        compression_ratio = input_rows / n_windows if n_windows > 0 else 1.0
-        processing_time = (time.time() - start_time) * 1000
-        
-        # Extract averaged arrays in native format
-        vis_avg = result.get('visibility_averaged', np.array([]))
-        weight_total = result.get('weight_total', np.array([]))
-        flag_combined = result.get('flag_combined', np.array([]))
-        
-        # Convert to flat lists for Spark compatibility
-        # Complex visibility data needs to be converted to [real, imag, real, imag, ...] format
-        if hasattr(vis_avg, 'flatten'):
-            vis_complex = vis_avg.flatten()
-            # Convert complex numbers to interleaved real/imag pairs
-            vis_flat = []
-            for complex_val in vis_complex:
-                if isinstance(complex_val, complex):
-                    vis_flat.extend([float(complex_val.real), float(complex_val.imag)])
-                else:
-                    # Handle case where it's already a real number
-                    vis_flat.extend([float(complex_val), 0.0])
-        else:
-            vis_flat = []
-            
-        weight_flat = weight_total.flatten().tolist() if hasattr(weight_total, 'flatten') else []
-        flag_flat = flag_combined.flatten().astype(int).tolist() if hasattr(flag_combined, 'flatten') else []
-        
-        # Create result DataFrame
-        result_data = {
-            'group_key': [group_key],
-            'baseline_key': [baseline_key],
-            'scan_number': [scan_number],
-            'antenna1': [antenna1],
-            'antenna2': [antenna2],
-            
-            # Averaged coordinates
-            'time_avg': [result.get('time_avg', result.get('time', 0.0))],
-            'u_avg': [result.get('u_avg', result.get('u', 0.0))],
-            'v_avg': [result.get('v_avg', result.get('v', 0.0))],
-            'w_avg': [result.get('w_avg', result.get('w', 0.0))],
-            'baseline_length': [result.get('baseline_length', 0.0)],
-            
-            # Scientific arrays (flattened native format)
-            'visibility_avg': [vis_flat],
-            'weight_total': [weight_flat],
-            'flag_combined': [flag_flat],
-            
-            # BDA statistics
-            'n_input_rows': [int(input_rows)],
-            'n_windows_created': [n_windows],
-            'window_duration_s': [result.get('window_dt_s', 0.0)],
-            'max_averaging_time_s': [result.get('delta_t_max', 0.0)],
-            'compression_ratio': [compression_ratio],
-            
-            # Metadata
-            'processing_timestamp': [time.time()],
-            'bda_config_hash': ['distributed_v1'],
-        }
-        
-        return pd.DataFrame(result_data)
-        
-    except Exception as e:
-        logging.warning(f"Error converting BDA results: {e}")
-        return create_fallback_bda_result_df(
-            group_key, baseline_key, scan_number, antenna1, antenna2, input_rows
-        )
-
-
-def create_fallback_bda_result_df(group_key, baseline_key, scan_number, antenna1, antenna2, input_rows):
-    """
-    Create fallback DataFrame when BDA processing encounters errors.
-    
-    Generates default result DataFrame with minimal valid data when
-    BDA processing fails or encounters exceptions. Ensures pipeline
-    continuity with safe default values.
-    
-    Parameters
-    ----------
-    group_key : str
-        Unique identifier for the failed group
-    baseline_key : str
-        Baseline identifier for the failed processing
-    scan_number : int
-        Scan number of the failed processing
-    antenna1, antenna2 : int
-        Antenna pair identifiers
-    input_rows : int
-        Number of input rows that failed processing
-        
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with safe default values matching BDA result schema
-    """
-    
-    return pd.DataFrame({
-        'group_key': [group_key],
-        'baseline_key': [baseline_key], 
-        'scan_number': [scan_number],
-        'antenna1': [antenna1],
-        'antenna2': [antenna2],
-        'time_avg': [0.0],
-        'u_avg': [0.0],
-        'v_avg': [0.0],
-        'w_avg': [0.0],
-        'baseline_length': [0.0],
-        'visibility_avg': [[0.0]],  # Flattened format
-        'weight_total': [[1.0]],    # Flattened format
-        'flag_combined': [[0]],     # Flattened format
-        'n_input_rows': [int(input_rows)],
-        'n_windows_created': [1],
-        'window_duration_s': [0.0],
-        'max_averaging_time_s': [0.0],
-        'compression_ratio': [1.0],
-        'processing_timestamp': [time.time()],
-        'bda_config_hash': ['fallback'],
-    })
-
-
-def create_empty_bda_result():
-    """
-    Create empty result DataFrame for groups without input data.
-    
-    Generates minimal DataFrame with default values when a processing
-    group contains no visibility data. Maintains schema consistency
-    for empty data scenarios.
-    
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with empty group default values matching BDA result schema
-    """
-    
-    return pd.DataFrame({
-        'group_key': ['empty'],
-        'baseline_key': ['empty'],
-        'scan_number': [0],
-        'antenna1': [0],
-        'antenna2': [0],
-        'time_avg': [0.0],
-        'u_avg': [0.0],
-        'v_avg': [0.0],
-        'w_avg': [0.0],
-        'baseline_length': [0.0],
-        'visibility_avg': [[0.0]],  # Flattened format
-        'weight_total': [[1.0]],    # Flattened format
-        'flag_combined': [[0]],     # Flattened format
-        'n_input_rows': [0],
-        'n_windows_created': [0],
-        'window_duration_s': [0.0],
-        'max_averaging_time_s': [0.0],
-        'compression_ratio': [1.0],
-        'processing_timestamp': [time.time()],
-        'bda_config_hash': ['empty'],
-    })
-
-
-def create_error_bda_result(error, group_key):
-    """
-    Create error result DataFrame for debugging failed group processing.
-    
-    Generates DataFrame containing error information when BDA group
-    processing encounters exceptions. Includes error context in the
-    configuration hash field for debugging purposes.
-    
-    Parameters
-    ----------
-    error : Exception
-        Exception that occurred during processing
-    group_key : str
-        Identifier of the group that failed processing
-        
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with error information matching BDA result schema
-    """
-    
-    return pd.DataFrame({
-        'group_key': [group_key],
-        'baseline_key': ['error'],
-        'scan_number': [0],
-        'antenna1': [0],
-        'antenna2': [0],
-        'time_avg': [0.0],
-        'u_avg': [0.0],
-        'v_avg': [0.0],
-        'w_avg': [0.0],
-        'baseline_length': [0.0],
-        'visibility_avg': [[0.0]],  # Flattened format
-        'weight_total': [[1.0]],    # Flattened format
-        'flag_combined': [[0]],     # Flattened format
-        'n_input_rows': [0],
-        'n_windows_created': [0],
-        'window_duration_s': [0.0],
-        'max_averaging_time_s': [0.0],
-        'compression_ratio': [1.0],
-        'processing_timestamp': [time.time()],
-        'bda_config_hash': [f'error:{str(error)[:50]}'],
-    })
+        int(bda_result.get('n_input_rows', 0)),              # n_input_rows
+        1,                                                   # n_windows_created
+        float(bda_result.get('window_duration_s', 0.0)),     # window_duration_s
+        float(bda_result.get('window_duration_s', 0.0)),     # max_averaging_time_s
+        float(bda_result.get('compression_ratio', 1.0)),     # compression_ratio
+        float(time.time()),                                  # processing_timestamp
+        'incremental_v1'                                     # bda_config_hash
+    )
