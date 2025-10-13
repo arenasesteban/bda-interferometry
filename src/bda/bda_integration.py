@@ -6,7 +6,7 @@ This module orchestrates the incremental BDA (Baseline-Dependent Averaging)     
             'processing_status': 'bda_completed_streaming',
             'total_bda_windows': total_windows,
             'total_input_rows': total_input_rows,
-            'unique_groups_processed': unique_groups,
+            'unique_groups_processed': min(unique_groups, 10),  # Estimation without collect()
             'sample_baseline_keys': min(unique_groups, 10),  # Estimation without collect()
             'sample_avg_compression': avg_compression_ratio,  # Use already calculated value
             'processing_mode': 'incremental_streaming_windows'
@@ -93,8 +93,13 @@ def apply_distributed_bda_pipeline(df, bda_config, enable_event_time=False,
         
         # Partition by baseline for streaming efficiency
         logger.info("Partitioning data for incremental BDA processing...")
-        # Optimal partitioning: 4 partitions for 4 cores, grouped by baseline
-        scientific_df_partitioned = scientific_df.repartition(4, col("antenna1"), col("antenna2"), col("scan_number"))
+        
+        # Get optimized Spark configuration for BDA
+        spark_config = get_optimized_spark_config(bda_config, scientific_df.sparkSession)
+        num_partitions = spark_config['num_partitions']
+        
+        logger.info(f"Using optimized BDA partitioning: {num_partitions} partitions")
+        scientific_df_partitioned = scientific_df.repartition(num_partitions, col("antenna1"), col("antenna2"), col("scan_number"))
         
         # Sort within partitions by time (maintains temporal order for decorrelation windows)
         sorted_df = scientific_df_partitioned.sortWithinPartitions("time")
@@ -157,8 +162,8 @@ def apply_distributed_bda_pipeline(df, bda_config, enable_event_time=False,
             'total_bda_windows': total_windows,
             'total_input_rows': total_input_rows,
             'unique_groups_processed': unique_groups,
-            'sample_baseline_keys': min(unique_groups, 10),  # Estimation without collect()
-            'sample_avg_compression': avg_compression_ratio,  # Use already calculated value
+            'sample_group_count': min(unique_groups, 10),    # Representative group count sample
+            'avg_compression_ratio': avg_compression_ratio,  # Average compression achieved
             'processing_mode': 'incremental_streaming_windows'
         }]
         
@@ -175,7 +180,10 @@ def apply_distributed_bda_pipeline(df, bda_config, enable_event_time=False,
         
         kpis_df = spark_session.createDataFrame(kpis_data, get_kpis_schema())
         
-        # Final result
+        # Validate BDA results
+        validation_results = validate_bda_results(bda_results_df, logger)
+        
+        # Final result logging
         logger.info(f"INCREMENTAL BDA PIPELINE COMPLETED")
         logger.info(f"   Input rows: {total_input_rows}")
         logger.info(f"   BDA windows: {total_windows}")
@@ -183,7 +191,8 @@ def apply_distributed_bda_pipeline(df, bda_config, enable_event_time=False,
         logger.info(f"   Maximum compression: {max_compression_ratio:.2f}:1")
         logger.info(f"   Groups processed: {unique_groups}")
         logger.info(f"   Average window duration: {avg_window_duration:.2f}s")
-        logger.info(f"   Mode: INCREMENTAL WINDOWS")
+        logger.info(f"   Window efficiency: {validation_results.get('avg_window_efficiency', 'N/A'):.1%}")
+        logger.info(f"   Mode: INCREMENTAL WINDOWS (Physics-based)")
         
         return {
             'results': bda_results_df,  # Complete DataFrame with BDA results
@@ -197,7 +206,11 @@ def apply_distributed_bda_pipeline(df, bda_config, enable_event_time=False,
                 'avg_compression_ratio': float(avg_compression_ratio),
                 'max_compression_ratio': float(max_compression_ratio),
                 'pipeline_status': 'complete_incremental_bda_pipeline',
-                'architecture': 'spark_mappartitions_decorrelation_windows'
+                'architecture': 'spark_mappartitions_decorrelation_windows',
+                'partitions_used': spark_config['num_partitions'],
+                'spark_parallelism': spark_config['default_parallelism'],
+                'executor_cores': spark_config['total_cores'],
+                'num_executors': spark_config['num_executors']
             }
         }
         
@@ -269,12 +282,23 @@ def get_bda_result_schema():
     
     Creates detailed schema for DataFrames containing averaged visibility data,
     baseline metadata, processing statistics, and BDA performance metrics
-    returned by distributed processing UDFs.
+    following Wijnholds et al. 2018 methodology.
     
     Returns
     -------
     StructType
-        Complete Spark schema for BDA result DataFrames
+        Complete Spark schema for BDA result DataFrames with fields:
+        - Baseline identifiers and averaged coordinates (UV-plane consistent)
+        - Physics-based decorrelation timing metrics
+        - Window efficiency and compression statistics
+        - Scientific data arrays (visibilities, weights, flags)
+        
+    Notes
+    -----
+    Schema updated to include decorrelation time analysis fields:
+    - decorrelation_time_used: Actual window duration
+    - decorrelation_time_planned: Optimal duration from physics
+    - window_efficiency: Ratio of actual vs planned duration
     """
     
     return StructType([
@@ -301,7 +325,9 @@ def get_bda_result_schema():
         StructField("n_input_rows", IntegerType(), False),
         StructField("n_windows_created", IntegerType(), False),
         StructField("window_duration_s", DoubleType(), False),
-        StructField("max_averaging_time_s", DoubleType(), False),
+        StructField("decorrelation_time_used", DoubleType(), False),
+        StructField("decorrelation_time_planned", DoubleType(), False),
+        StructField("window_efficiency", DoubleType(), False),
         StructField("compression_ratio", DoubleType(), False),
         
         # === METADATA ===
@@ -330,8 +356,8 @@ def get_final_bda_results_schema():
         StructField("total_bda_windows", IntegerType(), False),
         StructField("total_input_rows", IntegerType(), False),
         StructField("unique_groups_processed", IntegerType(), False),
-        StructField("sample_baseline_keys", IntegerType(), False),
-        StructField("sample_avg_compression", FloatType(), False),
+        StructField("sample_group_count", IntegerType(), False),
+        StructField("avg_compression_ratio", FloatType(), False),
         StructField("processing_mode", StringType(), False)
     ])
 
@@ -371,8 +397,7 @@ def convert_bda_result_to_spark_tuple(bda_result):
         float(bda_result.get('v_avg', 0.0)),                 # v_avg
         float(bda_result.get('w_avg', 0.0)),                 # w_avg
         float(np.sqrt(bda_result.get('u_avg', 0.0)**2 + 
-                     bda_result.get('v_avg', 0.0)**2 + 
-                     bda_result.get('w_avg', 0.0)**2)),      # baseline_length
+                     bda_result.get('v_avg', 0.0)**2)),      # baseline_length (UV-plane, consistent with BDA theory)
         
         vis_list,                                            # visibility_avg
         weight_list,                                         # weight_total
@@ -381,8 +406,133 @@ def convert_bda_result_to_spark_tuple(bda_result):
         int(bda_result.get('n_input_rows', 0)),              # n_input_rows
         1,                                                   # n_windows_created
         float(bda_result.get('window_duration_s', 0.0)),     # window_duration_s
-        float(bda_result.get('window_duration_s', 0.0)),     # max_averaging_time_s
+        float(bda_result.get('decorrelation_time_used', 0.0)),        # decorrelation_time_used
+        float(bda_result.get('decorrelation_time_planned', 0.0)),     # decorrelation_time_planned
+        float(bda_result.get('window_efficiency', 1.0)),     # window_efficiency
         float(bda_result.get('compression_ratio', 1.0)),     # compression_ratio
         float(time.time()),                                  # processing_timestamp
         'incremental_v1'                                     # bda_config_hash
     )
+
+
+def get_optimized_spark_config(bda_config, spark_session):
+    """
+    Get optimized Spark configuration parameters for BDA processing.
+    
+    Determines optimal partitioning, memory settings, and parallelism based on
+    BDA configuration and available Spark resources.
+    
+    Parameters
+    ----------
+    bda_config : dict
+        BDA configuration dictionary
+    spark_session : pyspark.sql.SparkSession
+        Active Spark session
+        
+    Returns
+    -------
+    dict
+        Optimized Spark configuration for BDA processing
+    """
+    try:
+        # Get available parallelism
+        default_parallelism = spark_session.sparkContext.defaultParallelism
+        total_cores = spark_session.sparkContext.getConf().get("spark.executor.cores", "1")
+        num_executors = spark_session.sparkContext.getConf().get("spark.executor.instances", "1")
+        
+        # Calculate optimal partitions for BDA (baseline grouping works best with moderate partitioning)
+        optimal_partitions = bda_config.get('bda_spark_partitions', None)
+        if optimal_partitions is None:
+            # Use 2-4x parallelism for good load balancing with baseline grouping
+            optimal_partitions = min(default_parallelism * 2, 200)  # Cap at 200 for efficiency
+        
+        logging.info(f"Spark config - Cores: {total_cores}, Executors: {num_executors}, "
+                    f"Default parallelism: {default_parallelism}, BDA partitions: {optimal_partitions}")
+        
+        return {
+            'num_partitions': optimal_partitions,
+            'default_parallelism': default_parallelism,
+            'total_cores': int(total_cores),
+            'num_executors': int(num_executors)
+        }
+        
+    except Exception as e:
+        logging.warning(f"Could not determine optimal Spark config: {e}")
+        return {
+            'num_partitions': 4,  # Safe fallback
+            'default_parallelism': 4,
+            'total_cores': 1,
+            'num_executors': 1
+        }
+
+
+def validate_bda_results(bda_results_df, logger=None):
+    """
+    Validate BDA processing results for consistency and quality.
+    
+    Performs sanity checks on BDA output to detect potential issues with
+    physics calculations, data integrity, or processing anomalies.
+    
+    Parameters
+    ----------
+    bda_results_df : pyspark.sql.DataFrame
+        DataFrame containing BDA processing results
+    logger : logging.Logger, optional
+        Logger for validation messages
+        
+    Returns
+    -------
+    dict
+        Validation results with statistics and warnings
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    
+    try:
+        # Basic counts and statistics
+        total_results = bda_results_df.count()
+        if total_results == 0:
+            logger.warning("BDA results DataFrame is empty")
+            return {'status': 'empty', 'total_results': 0}
+        
+        # Check for negative compression ratios (should never happen)
+        negative_compression = bda_results_df.filter(col("compression_ratio") <= 0).count()
+        if negative_compression > 0:
+            logger.error(f"Found {negative_compression} results with non-positive compression ratios")
+        
+        # Check window efficiency distribution
+        efficiency_stats = (bda_results_df
+                           .select(avg("window_efficiency").alias("avg_efficiency"),
+                                  spark_max("window_efficiency").alias("max_efficiency"),
+                                  count("*").alias("total_windows"))
+                           .collect()[0])
+        
+        avg_efficiency = float(efficiency_stats["avg_efficiency"] or 0.0)
+        max_efficiency = float(efficiency_stats["max_efficiency"] or 0.0)
+        
+        # Validate efficiency ranges
+        if avg_efficiency < 0.1:
+            logger.warning(f"Very low average window efficiency: {avg_efficiency:.2%}")
+        elif avg_efficiency > 1.2:
+            logger.warning(f"Suspiciously high average window efficiency: {avg_efficiency:.2%}")
+        
+        # Check for baseline length consistency (should be UV-plane)
+        zero_baselines = bda_results_df.filter(col("baseline_length") <= 0).count()
+        if zero_baselines > 0:
+            logger.warning(f"Found {zero_baselines} results with zero/negative baseline lengths")
+        
+        logger.info(f"BDA validation completed: {total_results} results, "
+                   f"avg efficiency: {avg_efficiency:.1%}, max efficiency: {max_efficiency:.1%}")
+        
+        return {
+            'status': 'validated',
+            'total_results': total_results,
+            'avg_window_efficiency': avg_efficiency,
+            'max_window_efficiency': max_efficiency,
+            'negative_compression_count': negative_compression,
+            'zero_baseline_count': zero_baselines
+        }
+        
+    except Exception as e:
+        logger.error(f"BDA validation failed: {e}")
+        return {'status': 'validation_failed', 'error': str(e)}
