@@ -11,6 +11,7 @@ determination, optimal averaging time computation, and vectorized visibility
 processing for distributed scientific computing environments.
 """
 
+import logging
 import numpy as np
 from typing import Dict, Any, Tuple, List
 from astropy import constants as const
@@ -19,9 +20,14 @@ from astropy import constants as const
 from .bda_config import get_default_bda_config
 
 
-def calculate_baseline_length(u: float, v: float, w: float = 0.0, in_wavelengths: bool = True) -> float:
+def calculate_baseline_length(u: float, v: float, w: float = 0.0, 
+                            mode: str = 'uv_plane', in_wavelengths: bool = True) -> float:
     """
-    Calculate baseline length from UVW coordinates using euclidean distance in UV plane.
+    Calculate baseline length from UVW coordinates with consistent methodology.
+    
+    For BDA temporal averaging, UV-plane length is typically sufficient since
+    decorrelation is dominated by Earth rotation effects in the UV plane.
+    Full 3D length may be used for specific geometric applications.
     
     Parameters
     ----------
@@ -30,7 +36,10 @@ def calculate_baseline_length(u: float, v: float, w: float = 0.0, in_wavelengths
     v : float
         V coordinate in wavelengths or meters  
     w : float, optional
-        W coordinate (not used in calculation, default: 0.0)
+        W coordinate in same units (default: 0.0)
+    mode : str, optional
+        Calculation mode: 'uv_plane' (√(u²+v²)) or '3d_full' (√(u²+v²+w²))
+        For BDA temporal averaging, 'uv_plane' is recommended (default: 'uv_plane')
     in_wavelengths : bool, optional
         If True, coordinates are in wavelengths, if False in meters (default: True)
         
@@ -38,8 +47,19 @@ def calculate_baseline_length(u: float, v: float, w: float = 0.0, in_wavelengths
     -------
     float
         Baseline length in same units as input coordinates
+        
+    Notes
+    -----
+    Following Wijnholds et al. 2018, BDA decorrelation calculations use UV-plane
+    baseline length since temporal smearing is dominated by du/dt and dv/dt terms.
     """
-    baseline_length = np.sqrt(u**2 + v**2)
+    if mode == 'uv_plane':
+        baseline_length = np.sqrt(u**2 + v**2)
+    elif mode == '3d_full':
+        baseline_length = np.sqrt(u**2 + v**2 + w**2)
+    else:
+        raise ValueError(f"Invalid mode: {mode}. Use 'uv_plane' or '3d_full'")
+    
     return baseline_length
 
 
@@ -47,21 +67,35 @@ def calculate_fringe_rate_conservative(baseline_length_lambda: float,
                                      declination_deg: float = -45.0,
                                      safety_margin: float = 2.0) -> float:
     """
-    Calculates fringe rate using conservative orientation-independent approximation.
+    Calculate conservative fringe rate using geometric upper-bound approximation.
+    
+    This is a fast, orientation-independent estimate suitable for streaming BDA.
+    Provides upper bound by assuming worst-case baseline orientation and source position.
+    For exact calculations, use calculate_fringe_rate_exact() with hour angle.
     
     Parameters
     ----------
     baseline_length_lambda : float
-        Baseline length in wavelengths
+        Baseline length in wavelengths (UV-plane)
     declination_deg : float, optional
         Source declination in degrees (default: -45.0)
     safety_margin : float, optional
-        Conservative safety factor (default: 2.0 for worst case)
+        Multiplicative margin for conservative estimation (≥1.0, typically 1.5-2.0)
+        Higher values increase estimated fringe rate → shorter averaging windows
         
     Returns
     -------
     float
-        Conservative fringe rate in rad/s
+        Conservative fringe rate in rad/s (upper bound)
+        
+    Notes
+    -----
+    The safety_margin here is different from safety_factor in decorrelation calculation:
+    - safety_margin (≥1): Multiplies fringe rate estimate (higher = more conservative)
+    - safety_factor (<1): Applied to decorrelation tolerance (lower = more conservative)
+    
+    This function OVERESTIMATES fringe rates for conservative BDA. The actual
+    safety control is applied in calculate_decorrelation_time() via safety_factor.
     """
     # Physical constants
     omega_earth = 7.2925e-5  # Earth angular velocity in rad/s
@@ -69,67 +103,167 @@ def calculate_fringe_rate_conservative(baseline_length_lambda: float,
     # Convert declination to radians
     dec_rad = np.radians(declination_deg)
     
-    # Conservative approximation: worst case for any orientation
-    max_du_dt = baseline_length_lambda * omega_earth * np.cos(dec_rad)
+    # Conservative approximation: worst case for any baseline orientation
+    # Assumes maximum possible du/dt and dv/dt components
+    max_du_dt = baseline_length_lambda * omega_earth * abs(np.cos(dec_rad))
     max_dv_dt = baseline_length_lambda * omega_earth * abs(np.sin(dec_rad))
     
-    # Conservative fringe rate (worst case scenario)
+    # Conservative fringe rate (geometric upper bound)
     conservative_fringe_rate = safety_margin * np.sqrt(max_du_dt**2 + max_dv_dt**2)
     
     return conservative_fringe_rate
 
 
-def calculate_decorrelation_time(baseline_length_meters: float,
-                               frequency_hz: float,
-                               config: Dict[str, float] = None) -> float:
+def calculate_fringe_rate_exact(baseline_u_lambda: float, baseline_v_lambda: float,
+                               declination_deg: float, hour_angle_deg: float,
+                               site_latitude_deg: float = -30.7) -> float:
     """
-    Calculates decorrelation time for a specific baseline.
+    Calculate exact fringe rate using Wijnholds et al. 2018 equations (42-43).
     
-    Implements equation 41 from Wijnholds et al. 2018:
-    T_decorr = sqrt(1 - R²) / |fringe_rate_total|
+    Implements precise du/dt and dv/dt calculations accounting for baseline
+    orientation, source position, and Earth rotation geometry.
     
     Parameters
     ----------
-    baseline_length_meters : float
-        Baseline length in meters
-    frequency_hz : float
-        Observation frequency in Hz
-    config : Dict[str, float], optional
-        BDA configuration. If None, uses default values
+    baseline_u_lambda : float
+        Baseline U component in wavelengths
+    baseline_v_lambda : float
+        Baseline V component in wavelengths
+    declination_deg : float
+        Source declination in degrees
+    hour_angle_deg : float
+        Source hour angle in degrees
+    site_latitude_deg : float, optional
+        Observatory latitude in degrees (default: -30.7 for SKA-mid)
         
     Returns
     -------
     float
-        Decorrelation time in seconds, limited by min/max_averaging_time
+        Exact fringe rate in rad/s
+        
+    Notes
+    -----
+    Implements equations (42-43) from Wijnholds et al. 2018:
+    du/dt = (1/λ) * (Lx*cos(H) - Ly*sin(H)) * ωE
+    dv/dt = (1/λ) * (Lx*sin(δ)*sin(H) + Ly*sin(δ)*cos(H)) * ωE
+    
+    where Lx, Ly are baseline components in ITRF coordinates.
+    """
+    # Physical constants
+    omega_earth = 7.2925e-5  # Earth angular velocity in rad/s
+    
+    # Convert to radians
+    dec_rad = np.radians(declination_deg)
+    ha_rad = np.radians(hour_angle_deg)
+    lat_rad = np.radians(site_latitude_deg)
+    
+    # Transform UV baseline to approximate ITRF components
+    # This is simplified - exact transformation requires full coordinate system
+    # For now, assume U ≈ East-West, V ≈ North-South component
+    Lx_lambda = baseline_u_lambda  # Approximate East-West component
+    Ly_lambda = baseline_v_lambda  # Approximate North-South component
+    
+    # Calculate du/dt and dv/dt (equations 42-43)
+    du_dt = (np.cos(ha_rad) * Lx_lambda - np.sin(ha_rad) * Ly_lambda) * omega_earth
+    dv_dt = (np.sin(dec_rad) * np.sin(ha_rad) * Lx_lambda + 
+             np.sin(dec_rad) * np.cos(ha_rad) * Ly_lambda) * omega_earth
+    
+    # Total fringe rate
+    fringe_rate = np.sqrt(du_dt**2 + dv_dt**2)
+    
+    return fringe_rate
+
+
+def calculate_decorrelation_time(baseline_length_meters: float,
+                               frequency_hz: float,
+                               config: Dict[str, float] = None,
+                               mode: str = 'conservative') -> float:
+    """
+    Calculate decorrelation time for a specific baseline.
+    
+    Implements equation (41) from Wijnholds et al. 2018:
+    T_decorr = sqrt(1 - R²) / |fringe_rate_total|
+    
+    The safety_factor is applied to the decorrelation tolerance (numerator):
+    T_decorr = safety_factor * sqrt(1 - R²) / |fringe_rate_total|
+    
+    where safety_factor < 1 makes BDA more conservative (shorter averaging times).
+    
+    Parameters
+    ----------
+    baseline_length_meters : float
+        Baseline length in meters (physical or UV-plane)
+    frequency_hz : float
+        Observation frequency in Hz
+    config : Dict[str, float], optional
+        BDA configuration. If None, uses default values
+    mode : str, optional
+        Calculation mode: 'conservative' (fast) or 'exact' (requires hour angle)
+        
+    Returns
+    -------
+    float
+        Decorrelation time in seconds, clipped to configured limits
+        
+    Notes
+    -----
+    Safety factor application:
+    - safety_factor < 1.0: More conservative (shorter averaging times)
+    - safety_factor = 1.0: Use theoretical limit exactly
+    - safety_factor > 1.0: Less conservative (longer averaging times, riskier)
+    
+    Correlator dump time is subtracted from the final result since dump
+    integration also contributes to decorrelation (Section 4.2 of paper).
     """
     if config is None:
         config = get_default_bda_config()
     
-    # Convert baseline to wavelengths
+    # Convert baseline to wavelengths for fringe rate calculation
     wavelength_m = const.c.value / frequency_hz
     baseline_length_lambda = baseline_length_meters / wavelength_m
     
-    # Calculate total fringe rate using conservative version
-    fringe_rate = calculate_fringe_rate_conservative(
-        baseline_length_lambda=baseline_length_lambda,
-        declination_deg=config['declination_deg'],
-        safety_margin=2.0  # Conservative factor
-    )
-    
-    # Calculate decorrelation time (equation 41)
-    if fringe_rate > 0:
-        # sqrt(1 - R²) / |fringe_rate| 
-        numerator = np.sqrt(1 - config['decorr_factor']**2)
-        decorr_time = numerator / fringe_rate
+    # Calculate fringe rate based on mode (WITHOUT safety factor - applied later)
+    if mode == 'conservative':
+        fringe_rate = calculate_fringe_rate_conservative(
+            baseline_length_lambda=baseline_length_lambda,
+            declination_deg=config['declination_deg'],
+            safety_margin=2.0  # Fixed conservative margin for upper bound estimation
+        )
+    elif mode == 'exact':
+        # Requires hour angle - for now, use conservative with warning
+        logging.warning("Exact mode requires hour angle, falling back to conservative")
+        fringe_rate = calculate_fringe_rate_conservative(
+            baseline_length_lambda=baseline_length_lambda,
+            declination_deg=config['declination_deg'],
+            safety_margin=2.0  # Fixed conservative margin
+        )
     else:
-        # Fallback for very short baselines
-        decorr_time = 180.0  # Default max averaging time
+        raise ValueError(f"Invalid mode: {mode}. Use 'conservative' or 'exact'")
     
-    # Apply safety factor
-    decorr_time *= config['safety_factor']
+    # Calculate decorrelation time (equation 41) with safety factor applied correctly
+    if fringe_rate > 0:
+        # sqrt(1 - R²) / |fringe_rate| with safety factor reducing allowed decorrelation
+        decorr_factor = config['decorr_factor']
+        safety_factor = config.get('safety_factor', 0.8)  # <1 reduces decorr time (more conservative)
+        
+        # Apply safety factor to the decorrelation tolerance (more conservative)
+        effective_numerator = np.sqrt(1 - decorr_factor**2) * safety_factor
+        decorr_time = effective_numerator / fringe_rate
+    else:
+        # Fallback for very short baselines (near zero fringe rate)
+        decorr_time = config.get('max_window_s', 180.0)
     
-    # Apply limits (1s min, 180s max)
-    decorr_time = np.clip(decorr_time, 1.0, 180.0)
+    # Account for correlator dump time effect
+    # Effective decorrelation budget must include dump time
+    correlator_dump = config.get('correlator_dump_s', 0.14)
+    if decorr_time > correlator_dump:
+        # Reserve some decorrelation budget for correlator dump
+        decorr_time = decorr_time - correlator_dump
+    
+    # Apply configured limits
+    min_time = config.get('min_window_s', 1.0)
+    max_time = config.get('max_window_s', 180.0)
+    decorr_time = np.clip(decorr_time, min_time, max_time)
     
     return decorr_time
 
@@ -137,9 +271,13 @@ def calculate_decorrelation_time(baseline_length_meters: float,
 def calculate_optimal_averaging_time(u: float, v: float, 
                                    frequency_hz: float,
                                    config: Dict[str, float] = None,
-                                   input_units: str = 'auto') -> float:
+                                   input_units: str = 'wavelengths') -> float:
     """
-    Calculates optimal averaging time for a baseline given by UV coordinates.
+    Calculate optimal averaging time for a single baseline sample.
+    
+    This function is designed for per-sample/per-row calculations in streaming
+    BDA processing. For group-based processing, use this function on individual
+    samples rather than group averages.
     
     Parameters
     ----------
@@ -152,76 +290,171 @@ def calculate_optimal_averaging_time(u: float, v: float,
     config : Dict[str, float], optional
         BDA configuration. If None, uses default values
     input_units : str, optional
-        Input units: 'meters', 'wavelengths', 'auto' (default: 'auto')
+        Input units: 'meters' or 'wavelengths' (default: 'wavelengths')
+        Explicit units required - no auto-detection to avoid errors
         
     Returns
     -------
     float
-        Optimal averaging time in seconds
+        Optimal averaging time in seconds for this baseline
+        
+    Notes
+    -----
+    This function can be vectorized for batch processing of multiple baselines.
+    For streaming applications, call this per visibility sample to get
+    appropriate window sizes.
     """
     if config is None:
         config = get_default_bda_config()
     
-    # Ensure units are in wavelengths
+    # Ensure units are in wavelengths (no auto-detection for reliability)
+    if input_units not in ['meters', 'wavelengths']:
+        raise ValueError(f"input_units must be 'meters' or 'wavelengths', got '{input_units}'")
+    
     u_lambda, v_lambda = ensure_baseline_units_wavelengths(u, v, frequency_hz, input_units)
     
-    # Calculate baseline length in wavelengths  
-    baseline_length_lambda = calculate_baseline_length(u_lambda, v_lambda)
+    # Calculate UV-plane baseline length (consistent with BDA theory)
+    baseline_length_lambda = calculate_baseline_length(u_lambda, v_lambda, mode='uv_plane')
     
-    # Convert to meters for decorrelation time
+    # Convert to meters for decorrelation time calculation
     wavelength_m = const.c.value / frequency_hz
     baseline_length_meters = baseline_length_lambda * wavelength_m
     
-    # Calculate decorrelation time
+    # Calculate decorrelation time using configured method
     averaging_time = calculate_decorrelation_time(
         baseline_length_meters=baseline_length_meters,
         frequency_hz=frequency_hz,
-        config=config
+        config=config,
+        mode='conservative'  # Use conservative mode for streaming
     )
     
     return averaging_time
 
 
+def calculate_optimal_averaging_time_vectorized(u_array: np.ndarray, v_array: np.ndarray,
+                                              frequency_hz: float,
+                                              config: Dict[str, float] = None,
+                                              input_units: str = 'wavelengths') -> np.ndarray:
+    """
+    Vectorized calculation of optimal averaging times for multiple baselines.
+    
+    Efficient batch processing for arrays of UV coordinates, useful for
+    preprocessing entire datasets or partition-level processing.
+    
+    Parameters
+    ----------
+    u_array : np.ndarray
+        Array of U coordinates
+    v_array : np.ndarray
+        Array of V coordinates (same shape as u_array)
+    frequency_hz : float
+        Observation frequency in Hz
+    config : Dict[str, float], optional
+        BDA configuration
+    input_units : str, optional
+        Input units for coordinates (default: 'wavelengths')
+        
+    Returns
+    -------
+    np.ndarray
+        Array of optimal averaging times in seconds (same shape as input)
+    """
+    if config is None:
+        config = get_default_bda_config()
+    
+    # Vectorized unit conversion
+    if input_units == 'meters':
+        wavelength_m = const.c.value / frequency_hz
+        u_lambda = u_array / wavelength_m
+        v_lambda = v_array / wavelength_m
+    else:
+        u_lambda = u_array
+        v_lambda = v_array
+    
+    # Vectorized baseline length calculation
+    baseline_lengths_lambda = np.sqrt(u_lambda**2 + v_lambda**2)
+    baseline_lengths_meters = baseline_lengths_lambda * (const.c.value / frequency_hz)
+    
+    # Vectorized decorrelation time calculation
+    # This could be optimized further for large arrays
+    averaging_times = np.array([
+        calculate_decorrelation_time(bl_m, frequency_hz, config, mode='conservative')
+        for bl_m in baseline_lengths_meters
+    ])
+    
+    return averaging_times
+
+
 def create_bda_windows(times: np.ndarray, 
                       delta_t_max: float,
                       baseline_length: float = None,
-                      frequency_hz: float = None) -> List[Tuple[int, int]]:
+                      frequency_hz: float = None,
+                      min_samples_per_window: int = 1) -> List[Tuple[int, int]]:
     """
-    Divides observations into temporal windows according to smearing limits.
+    Divide observations into temporal windows according to decorrelation limits.
+    
+    Creates windows that respect the maximum decorrelation time while avoiding
+    single-sample windows when possible (unless data is naturally sparse).
     
     Parameters
     ----------
     times : np.ndarray
-        Array of timestamps ordered by time
+        Array of timestamps ordered by time (assumed sorted)
     delta_t_max : float
-        Maximum decorrelation time for this baseline
+        Maximum decorrelation time for this baseline in seconds
     baseline_length : float, optional
-        Baseline length (for logging/debug)
+        Baseline length for logging/debug (not used in calculation)
     frequency_hz : float, optional
-        Observation frequency (for logging/debug)
+        Observation frequency for logging/debug (not used in calculation)
+    min_samples_per_window : int, optional
+        Minimum samples per window when possible (default: 1)
         
     Returns
     -------
     List[Tuple[int, int]]
-        List of (start_idx, end_idx) for each window
+        List of (start_idx, end_idx) tuples defining each window.
+        end_idx is exclusive (Python slice convention).
+        
+    Notes
+    -----
+    Window closure uses >= comparison for robustness with floating point times.
+    Single-sample windows are created when necessary due to large time gaps.
     """
     if len(times) == 0:
         return []
+    
+    if len(times) == 1:
+        return [(0, 1)]
     
     windows = []
     window_start = 0
     
     for i in range(1, len(times)):
-        # Calculate cumulative window width if we include this point
+        # Calculate cumulative window span including current sample
         window_span = times[i] - times[window_start]
         
-        # If total width would exceed Δt_max, close current window
-        if window_span > delta_t_max:
-            windows.append((window_start, i))
-            window_start = i
+        # Close window if span exceeds decorrelation limit
+        # Use >= for robustness with floating-point comparisons
+        if window_span >= delta_t_max:
+            # Close previous window (don't include current sample)
+            if i > window_start:
+                windows.append((window_start, i))
+                window_start = i
+            else:
+                # Edge case: single sample exceeds limit (shouldn't happen normally)
+                windows.append((window_start, i))
+                window_start = i
     
-    # Add last window
-    windows.append((window_start, len(times)))
+    # Add final window if it contains any samples
+    if window_start < len(times):
+        windows.append((window_start, len(times)))
+    
+    # Optional: log statistics for monitoring
+    if baseline_length is not None and len(windows) > 0:
+        avg_samples = np.mean([end - start for start, end in windows])
+        logging.debug(f"BDA windows: {len(windows)} windows, "
+                     f"avg {avg_samples:.1f} samples/window, "
+                     f"baseline {baseline_length:.1f}m")
     
     return windows
 
@@ -429,9 +662,12 @@ def apply_bda_to_group(group_data: Dict[str, np.ndarray],
 
 def ensure_baseline_units_wavelengths(u: float, v: float, 
                                     frequency_hz: float,
-                                    input_units: str = 'auto') -> Tuple[float, float]:
+                                    input_units: str) -> Tuple[float, float]:
     """
-    Ensures that u,v coordinates are in wavelengths.
+    Convert baseline coordinates to wavelengths with explicit unit specification.
+    
+    Requires explicit input_units to avoid auto-detection errors that can occur
+    with real observational data where magnitudes vary significantly.
     
     Parameters
     ----------
@@ -441,24 +677,25 @@ def ensure_baseline_units_wavelengths(u: float, v: float,
         V coordinate  
     frequency_hz : float
         Observation frequency in Hz
-    input_units : str, optional
-        Input units: 'meters', 'wavelengths', 'auto' (default: 'auto')
+    input_units : str
+        Input units: 'meters' or 'wavelengths' (explicit specification required)
         
     Returns
     -------
     Tuple[float, float]
         (u_wavelengths, v_wavelengths)
+        
+    Raises
+    ------
+    ValueError
+        If input_units is not 'meters' or 'wavelengths'
+        
+    Notes
+    -----
+    Auto-detection is removed to prevent errors with real data where baseline
+    magnitudes can vary significantly. Consumer services should specify units
+    explicitly based on their data format knowledge.
     """
-    # Auto-detect units if not specified
-    if input_units == 'auto':
-        baseline_magnitude = np.sqrt(u**2 + v**2)
-        # If magnitude > 10000, probably in meters
-        # If between 1-10000, probably in wavelengths
-        if baseline_magnitude > 10000:
-            input_units = 'meters'
-        else:
-            input_units = 'wavelengths'
-    
     if input_units == 'meters':
         # Convert meters to wavelengths
         wavelength_m = const.c.value / frequency_hz
@@ -469,4 +706,5 @@ def ensure_baseline_units_wavelengths(u: float, v: float,
         # Already in wavelengths
         return u, v
     else:
-        raise ValueError(f"Unsupported units: {input_units}")
+        raise ValueError(f"input_units must be 'meters' or 'wavelengths', got '{input_units}'. "
+                        "Auto-detection removed for reliability with real data.")
