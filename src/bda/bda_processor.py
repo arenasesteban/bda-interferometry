@@ -2,54 +2,127 @@
 BDA Processor - Incremental Streaming Processing with Decorrelation Windows
 
 This module implements memory-efficient BDA processing using incremental windows
-based on physical decorrelation time. Instead of accumulating full baselines,
-it processes data online as it arrives, maintaining constant RAM usage.
+based on physical decorrelation time following Wijnholds et al. 2018 methodology.
+Instead of accumulating full baselines, it processes data online as it arrives,
+maintaining constant RAM usage.
 
 The approach uses Spark's mapPartitions for distributed processing with window
-closure based on baseline-dependent decorrelation criteria.
+closure based on baseline-dependent decorrelation criteria using proper physics.
 
 Key Functions
 -------------
 process_rows_incrementally : Main streaming BDA processor with online windows
 complete_bda_window : Weighted averaging and window completion
-calculate_decorrelation_time : Physics-based window sizing
+get_decorrelation_time_for_sample : Physics-based window sizing per visibility sample
 """
 
 import numpy as np
+from typing import Dict, Any, Iterator, Tuple
+
+# Import corrected physics from bda_core
+from .bda_core import calculate_optimal_averaging_time, calculate_baseline_length
 
 
-def calculate_decorrelation_time(baseline_length_m, base_time_s=10.0):
+def get_decorrelation_time_for_sample(u: float, v: float, bda_config: Dict[str, Any]) -> float:
     """
-    Calculate decorrelation time based on baseline length.
+    Calculate decorrelation time for a single visibility sample using physics.
     
-    Shorter baselines decorrelate slower (longer windows),
-    longer baselines decorrelate faster (shorter windows).
+    Replaces heuristic baseline-length thresholds with proper Wijnholds et al. 2018
+    equations accounting for frequency, declination, Earth rotation, and safety factors.
     
     Parameters
     ----------
-    baseline_length_m : float
-        Baseline length in meters
-    base_time_s : float
-        Base decorrelation time in seconds
+    u : float
+        U coordinate in wavelengths (assumed from consumer)
+    v : float
+        V coordinate in wavelengths (assumed from consumer)
+    bda_config : Dict[str, Any]
+        BDA configuration with physics parameters
         
     Returns
     -------
     float
-        Appropriate decorrelation time for this baseline
+        Optimal decorrelation time in seconds for this baseline
+        
+    Notes
+    -----
+    This function assumes UV coordinates are already in wavelengths from the consumer.
+    If consumer provides meters, modify extract functions to convert units there.
     """
-    if baseline_length_m < 100:
-        return base_time_s * 2.0    # Short baselines: longer windows
-    elif baseline_length_m < 1000:
-        return base_time_s * 1.0    # Medium baselines: standard windows  
-    else:
-        return base_time_s * 0.5    # Long baselines: shorter windows
+    frequency_hz = bda_config.get('frequency_hz', 700e6)
+    
+    # Use corrected physics from bda_core
+    decorr_time = calculate_optimal_averaging_time(
+        u=u, 
+        v=v,
+        frequency_hz=frequency_hz,
+        config=bda_config,
+        input_units='wavelengths'  # Explicit units - no auto-detection
+    )
+    
+    return decorr_time
 
 
-def create_bda_window(start_time, decorr_time):
-    """Create empty BDA window dictionary"""
+def adapt_decorrelation_time_streaming(baseline_key: Tuple[int, int, int], 
+                                     current_decorr_time: float,
+                                     new_decorr_time: float,
+                                     tolerance: float = 0.2) -> bool:
+    """
+    Check if decorrelation time change requires window restart.
+    
+    In streaming mode, if the optimal decorrelation time changes significantly
+    between samples (due to changing UV coordinates), we may need to close
+    the current window and start fresh.
+    
+    Parameters
+    ----------
+    baseline_key : Tuple[int, int, int]
+        Baseline identifier (antenna1, antenna2, scan)
+    current_decorr_time : float
+        Current window's decorrelation time
+    new_decorr_time : float
+        New sample's optimal decorrelation time
+    tolerance : float, optional
+        Relative tolerance for change (default: 0.2 = 20%)
+        
+    Returns
+    -------
+    bool
+        True if window should be restarted due to significant Δt change
+    """
+    if current_decorr_time == 0:
+        return False
+    
+    relative_change = abs(new_decorr_time - current_decorr_time) / current_decorr_time
+    should_restart = relative_change > tolerance
+    
+    if should_restart:
+        print(f"🔄 Decorr time changed {relative_change:.1%} for {baseline_key} "
+              f"({current_decorr_time:.1f}s → {new_decorr_time:.1f}s) - restarting window")
+    
+    return should_restart
+
+
+def create_bda_window(start_time: float, decorr_time: float) -> Dict[str, Any]:
+    """
+    Create empty BDA window dictionary for streaming processing.
+    
+    Parameters
+    ----------
+    start_time : float
+        Window start time in seconds
+    decorr_time : float
+        Decorrelation time limit for this window
+        
+    Returns
+    -------
+    Dict[str, Any]
+        Empty window dictionary ready for sample accumulation
+    """
     return {
         'start_time': start_time,
         'end_time': start_time + decorr_time,
+        'decorr_time': decorr_time,  # Store for adaptive logic
         'visibilities': [],
         'weights': [],
         'flags': [],
@@ -74,27 +147,56 @@ def add_sample_to_window(window, vis, weight, flag, u, v, w, t):
     return window
 
 
-def should_close_window(window, current_time, decorr_time):
+def should_close_window(window: Dict[str, Any], current_time: float, 
+                       new_decorr_time: float, baseline_key: Tuple[int, int, int] = None) -> bool:
     """
     Check if window should be closed based on multiple decorrelation criteria.
     
-    Online window closure logic - emit results as soon as criteria are met.
+    Enhanced window closure logic that considers:
+    1. Decorrelation time limits (physics-based)
+    2. Data sparsity gaps 
+    3. Memory management limits
+    4. Adaptive decorrelation time changes
+    
+    Parameters
+    ----------
+    window : Dict[str, Any]
+        Current window state
+    current_time : float
+        Current sample timestamp
+    new_decorr_time : float
+        Decorrelation time for current sample
+    baseline_key : Tuple[int, int, int], optional
+        Baseline identifier for logging
+        
+    Returns
+    -------
+    bool
+        True if window should be closed and emitted
     """
     if window['n_samples'] == 0:
         return False
     
     # Criterion 1: Maximum decorrelation time exceeded
     time_since_start = current_time - window['start_time']
-    if time_since_start >= decorr_time:
+    if time_since_start >= new_decorr_time:
         return True
     
     # Criterion 2: Large time gap since last sample (data sparsity)
     if window['times']:
         time_since_last = current_time - max(window['times'])
-        if time_since_last > decorr_time * 0.5:
+        # Use smaller of current and new decorrelation times for gap detection
+        gap_threshold = min(new_decorr_time, window.get('decorr_time', new_decorr_time)) * 0.5
+        if time_since_last > gap_threshold:
             return True
     
-    # Criterion 3: Window buffer too large (memory management)
+    # Criterion 3: Significant change in optimal decorrelation time
+    if 'decorr_time' in window and baseline_key is not None:
+        if adapt_decorrelation_time_streaming(baseline_key, window['decorr_time'], 
+                                            new_decorr_time, tolerance=0.3):
+            return True
+    
+    # Criterion 4: Window buffer too large (memory management)
     max_samples_per_window = 1000  # Configurable limit
     if window['n_samples'] >= max_samples_per_window:
         return True
@@ -205,6 +307,10 @@ def complete_bda_window(window, baseline_key):
         w_avg = np.mean(window['w_coords']) if window['w_coords'] else 0.0
         time_avg = np.mean(window['times']) if window['times'] else 0.0
         
+        # Calculate effective window duration (actual vs planned)
+        planned_duration = window.get('decorr_time', window['end_time'] - window['start_time'])
+        actual_duration = window['end_time'] - window['start_time']
+        
         return {
             'group_key': baseline_key,
             'visibility_averaged': vis_averaged,
@@ -215,10 +321,12 @@ def complete_bda_window(window, baseline_key):
             'v_avg': v_avg,
             'w_avg': w_avg,
             'n_input_rows': window['n_samples'],
-            'window_duration_s': window['end_time'] - window['start_time'],
+            'window_duration_s': actual_duration,
             'compression_ratio': float(window['n_samples']),  # n_samples -> 1 result (per window)
             'window_id': f"{baseline_key}_{int(window['start_time'])}",
-            'decorrelation_time_used': window['end_time'] - window['start_time']
+            'decorrelation_time_used': actual_duration,
+            'decorrelation_time_planned': planned_duration,  # For analysis
+            'window_efficiency': actual_duration / planned_duration if planned_duration > 0 else 1.0
         }
         
     except Exception as e:
@@ -246,53 +354,183 @@ def create_empty_bda_result(baseline_key):
 
 
 def extract_visibility_array(row):
-    """Extract and reshape visibility array from Spark row"""
+    """
+    Extract and reshape visibility array from Spark row.
+    
+    EXPECTED ROW FIELDS (must be provided by consumer service):
+    - row.visibilities: List of floats in interleaved real/imag format [r1,i1,r2,i2,...]
+    - row.n_channels: Integer number of frequency channels
+    - row.n_correlations: Integer number of polarization correlations
+    
+    Parameters
+    ----------
+    row : pyspark.sql.Row
+        Spark row containing visibility data from consumer service
+        
+    Returns
+    -------
+    np.ndarray
+        Complex visibility array shaped (n_channels, n_correlations)
+        Empty array if extraction fails
+        
+    Notes
+    -----
+    If consumer service changes field names, update field access here.
+    This function centralizes consumer data format dependencies.
+    """
     try:
-        vis_list = row.visibilities
+        # Extract interleaved real/imag list (consumer contract)
+        vis_list = getattr(row, 'visibilities', None)
         if not vis_list:
-            return np.array([])
+            return np.array([], dtype=np.complex64)
         
         # Convert interleaved real/imag back to complex
         vis_flat = np.array(vis_list, dtype=np.float32)
         if len(vis_flat) % 2 != 0:
-            vis_flat = vis_flat[:-1]  # Remove odd element
+            vis_flat = vis_flat[:-1]  # Remove odd element for safety
             
         vis_complex = vis_flat[::2] + 1j * vis_flat[1::2]
         
-        # Reshape to (n_channels, n_correlations)
-        n_channels = int(row.n_channels)
-        n_correlations = int(row.n_correlations)
+        # Get dimensions from consumer metadata
+        n_channels = int(getattr(row, 'n_channels', 1))
+        n_correlations = int(getattr(row, 'n_correlations', 1))
         
-        if vis_complex.size == n_channels * n_correlations:
+        # Reshape to expected format
+        expected_size = n_channels * n_correlations
+        if vis_complex.size == expected_size:
             return vis_complex.reshape(n_channels, n_correlations)
         else:
-            # Fallback for size mismatch
-            return vis_complex.reshape(-1, 1)
+            # Fallback for size mismatch - log warning in production
+            print(f"⚠️ Visibility size mismatch: got {vis_complex.size}, expected {expected_size}")
+            return vis_complex.reshape(-1, max(1, n_correlations))
             
-    except Exception:
-        return np.array([])
+    except Exception as e:
+        print(f"⚠️ Error extracting visibilities: {e}")
+        return np.array([], dtype=np.complex64)
 
 
 def extract_weight_array(row):
-    """Extract weight array from Spark row"""
+    """
+    Extract weight array from Spark row.
+    
+    EXPECTED ROW FIELDS:
+    - row.weight: List of floats representing visibility weights
+    
+    Parameters
+    ----------
+    row : pyspark.sql.Row
+        Spark row from consumer service
+        
+    Returns
+    -------
+    np.ndarray
+        Weight array (float32), empty if extraction fails
+    """
     try:
-        weight_list = row.weight
+        weight_list = getattr(row, 'weight', None)
         if not weight_list:
-            return np.array([])
+            return np.array([], dtype=np.float32)
         return np.array(weight_list, dtype=np.float32)
-    except Exception:
-        return np.array([])
+    except Exception as e:
+        print(f"⚠️ Error extracting weights: {e}")
+        return np.array([], dtype=np.float32)
 
 
 def extract_flag_array(row):
-    """Extract flag array from Spark row"""
+    """
+    Extract flag array from Spark row.
+    
+    EXPECTED ROW FIELDS:
+    - row.flag: List of booleans/integers representing data flags
+    
+    Parameters
+    ----------
+    row : pyspark.sql.Row
+        Spark row from consumer service
+        
+    Returns
+    -------
+    np.ndarray
+        Boolean flag array, empty if extraction fails
+    """
     try:
-        flag_list = row.flag
+        flag_list = getattr(row, 'flag', None)
         if not flag_list:
-            return np.array([])
-        return np.array(flag_list, dtype=np.bool_)
-    except Exception:
-        return np.array([])
+            return np.array([], dtype=bool)
+        
+        # Handle both boolean and integer flags
+        flag_array = np.array(flag_list)
+        return flag_array.astype(bool)
+        
+    except Exception as e:
+        print(f"⚠️ Error extracting flags: {e}")
+        return np.array([], dtype=bool)
+
+
+def validate_consumer_row_format(row, baseline_key: Tuple[int, int, int] = None) -> bool:
+    """
+    Validate that Spark row contains expected fields from consumer service.
+    
+    This function centralizes validation of consumer data format to catch
+    interface changes early and provide clear error messages.
+    
+    Parameters
+    ----------
+    row : pyspark.sql.Row
+        Spark row from consumer service
+    baseline_key : Tuple[int, int, int], optional
+        Baseline identifier for error reporting
+        
+    Returns
+    -------
+    bool
+        True if row format is valid, False otherwise
+        
+    Notes
+    -----
+    Add/remove field checks here if consumer service changes data format.
+    This provides a single place to manage consumer interface dependencies.
+    """
+    required_fields = {
+        'antenna1': int,
+        'antenna2': int, 
+        'scan_number': int,
+        'time': (int, float),
+        'u': (int, float),
+        'v': (int, float),
+        'w': (int, float),
+        'visibilities': list,
+        'weight': list,
+        'flag': list,
+        'n_channels': int,
+        'n_correlations': int
+    }
+    
+    missing_fields = []
+    invalid_types = []
+    
+    for field, expected_type in required_fields.items():
+        if not hasattr(row, field):
+            missing_fields.append(field)
+            continue
+            
+        field_value = getattr(row, field)
+        if field_value is None:
+            missing_fields.append(f"{field} (None)")
+            continue
+            
+        if not isinstance(field_value, expected_type):
+            invalid_types.append(f"{field}: expected {expected_type}, got {type(field_value)}")
+    
+    if missing_fields or invalid_types:
+        baseline_str = f" for {baseline_key}" if baseline_key else ""
+        if missing_fields:
+            print(f"⚠️ Missing fields{baseline_str}: {missing_fields}")
+        if invalid_types:
+            print(f"⚠️ Invalid types{baseline_str}: {invalid_types}")
+        return False
+    
+    return True
 
 
 def process_rows_incrementally(row_iterator, bda_config):
@@ -327,22 +565,22 @@ def process_rows_incrementally(row_iterator, bda_config):
         'n_input_rows', 'window_duration_s', 'compression_ratio'
     """
     active_windows = {}  # baseline_key -> window
-    base_decorr_time = bda_config.get('decorrelation_time_s', 10.0)
     
     for row in row_iterator:
         # Extract baseline info
         baseline_key = (int(row.antenna1), int(row.antenna2), int(row.scan_number))
         current_time = float(row.time)
         
-        # Calculate baseline length for decorrelation time
+        # Extract UV coordinates (assuming already in wavelengths from consumer)
         u, v, w = float(row.u), float(row.v), float(row.w)
-        baseline_length = np.sqrt(u*u + v*v + w*w)
-        decorr_time = calculate_decorrelation_time(baseline_length, base_decorr_time)
+        
+        # Calculate physics-based decorrelation time using corrected equations
+        decorr_time = get_decorrelation_time_for_sample(u, v, bda_config)
         
         # Check if existing window should be closed
         if baseline_key in active_windows:
             window = active_windows[baseline_key]
-            if should_close_window(window, current_time, decorr_time):
+            if should_close_window(window, current_time, decorr_time, baseline_key):
                 # Complete and yield window
                 result = complete_bda_window(window, baseline_key)
                 
@@ -359,10 +597,17 @@ def process_rows_incrementally(row_iterator, bda_config):
         if baseline_key not in active_windows:
             active_windows[baseline_key] = create_bda_window(current_time, decorr_time)
         
+        # Validate row format before processing (optional - can disable in production)
+        if not validate_consumer_row_format(row, baseline_key):
+            print(f"⚠️ Invalid row format for {baseline_key}: skipping sample")
+            continue  # Skip this row
+        
         # Extract arrays from row
         vis_array = extract_visibility_array(row)
         weight_array = extract_weight_array(row)
         flag_array = extract_flag_array(row)
+        
+
         
         # Add sample to active window
         window = active_windows[baseline_key]
