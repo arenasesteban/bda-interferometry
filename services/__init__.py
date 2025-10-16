@@ -21,10 +21,12 @@ from .producer_service import (
 
 # Consumer functions  
 from .consumer_service import (
-    run_spark_consumer,
-    create_deserialize_to_structs_udf,
-    process_streaming_batch_optimized,
-    normalize_baseline_key
+    define_visibility_schema,
+    process_chunk,
+    deserialize_chunk_to_rows,
+    process_streaming_batch,
+    normalize_baseline_key,
+    run_consumer,
 )
 
 __all__ = [
@@ -35,8 +37,10 @@ __all__ = [
     'serialize_chunk',
     
     # Consumer functions
-    'run_spark_consumer',
-    'create_deserialize_to_structs_udf',
-    'process_streaming_batch_optimized',
-    'normalize_baseline_key'
+    'define_visibility_schema',
+    'process_chunk',
+    'deserialize_chunk_to_rows',
+    'process_streaming_batch',
+    'normalize_baseline_key',
+    'run_consumer',
 ]

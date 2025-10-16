@@ -48,163 +48,278 @@ def define_visibility_schema():
         StructField("field_id", IntegerType(), True),
         StructField("spw_id", IntegerType(), True),
         StructField("polarization_id", IntegerType(), True),
+
         StructField("row_start", IntegerType(), True),
         StructField("row_end", IntegerType(), True),
         StructField("nrows", IntegerType(), True),
         StructField("n_channels", IntegerType(), True),
         StructField("n_correlations", IntegerType(), True),
+
         StructField("antenna1", IntegerType(), True),
         StructField("antenna2", IntegerType(), True),
         StructField("scan_number", IntegerType(), True),
         StructField("baseline_key", StringType(), True),
+
         StructField("longitude", DoubleType(), True),
         StructField("lambda_ref", DoubleType(), True),
         StructField("ra", DoubleType(), True),
         StructField("dec", DoubleType(), True),
+
         StructField("exposure", DoubleType(), True),
         StructField("interval", DoubleType(), True),
         StructField("integration_time_s", DoubleType(), True),
+
         StructField("time", DoubleType(), True),
         StructField("u", DoubleType(), True),
         StructField("v", DoubleType(), True),
         StructField("w", DoubleType(), True),
-        StructField("visibilities", ArrayType(DoubleType()), True),
+
+        # visibilities: [chan][corr] con [real, imag] -> Array de Array de Array de Double
+        StructField("visibilities", ArrayType(ArrayType(ArrayType(DoubleType()))), True),
+        # weight: [corr] -> Array de Double
         StructField("weight", ArrayType(DoubleType()), True),
-        StructField("flag", ArrayType(IntegerType()), True)
+        # flag: [chan][corr] con 0/1 -> Array de Array de Boolean
+        StructField("flag", ArrayType(ArrayType(IntegerType())), True)
     ])
 
+def deserialize_array(field_dict, field_name, expected_shapes):
+    """
+    Deserialize NumPy array from MessagePack serialized format.
+    
+    Handles both regular and compressed NumPy arrays from producer.
+    
+    Parameters
+    ----------
+    field_dict : dict
+        Dictionary containing 'type' and 'data' keys
+    field_name : str
+        Name of the field for error reporting
+        
+    Returns
+    -------
+    numpy.ndarray
+        Deserialized NumPy array
+    """
+    try:
+        if not isinstance(field_dict, dict):
+            print(f"Error {field_name} is not a dict: {type(field_dict)}")
+            return np.array([])
+        
+        if 'type' not in field_dict or 'data' not in field_dict:
+            print(f"Error {field_name} missing 'type' or 'data' keys: {field_dict.keys()}")
+            return np.array([])
+        
+        array_type = field_dict['type']
+        if array_type not in ['ndarray', 'ndarray_compressed']:
+            print(f"Error {field_name} unsupported type: {array_type}")
+            return np.array([])
+        
+        # Obtener datos binarios
+        binary_data = field_dict['data']
+        
+        if array_type == 'ndarray_compressed':
+            try:
+                binary_data = zlib.decompress(binary_data)
+            except zlib.error as e:
+                print(f"Error Failed to decompress {field_name}: {e}")
+                return np.array([])
+        
+        # Auto-detectar dtype basado en el nombre del campo
+        if 'visibilities' in field_name.lower():
+            array = np.frombuffer(binary_data, dtype=np.complex128)
+        elif 'weight' in field_name.lower():
+            array = np.frombuffer(binary_data, dtype=np.float32)
+        elif 'flag' in field_name.lower():
+            array = np.frombuffer(binary_data, dtype=np.bool_)
+        else:
+            print(f"Error unknown field type for {field_name}")
+            return np.array([])
+        
+        if array.size > 0:
+            return array.reshape(expected_shapes[field_name])
+        
+        return array
+        
+    except Exception as e:
+        print(f"Error deserializing {field_name}: {e}")
+        traceback.print_exc()
+        return np.array([])
+    
+def extract_data(visibilities, flag, weight, i):
+    row_visibilities = visibilities[i] if i < len(visibilities) else np.array([])
+    row_weight = weight[i] if i < len(weight) else np.array([])
+    row_flag = flag[i] if i < len(flag) else np.array([])
+
+    if row_visibilities.size > 0 and np.iscomplexobj(row_visibilities):
+
+        vis_real_imag = []
+        for chan in range(row_visibilities.shape[0]):
+            chan_data = []
+            for corr in range(row_visibilities.shape[1]):
+                complex_val = row_visibilities[chan, corr]
+                chan_data.append([float(complex_val.real), float(complex_val.imag)])
+            vis_real_imag.append(chan_data)
+        row_vis_list = vis_real_imag
+    else:
+        row_vis_list = []
+
+    # Convertir weight y flag a listas Python
+    row_weight_list = row_weight.tolist() if row_weight.size > 0 else []
+    row_flag_list = row_flag.astype(int).tolist() if row_flag.size > 0 else []
+
+    return row_vis_list, row_weight_list, row_flag_list
+
 def process_chunk(chunk):
-    # Extract chunk metadata using standard field names
-    subms_id = chunk.get('subms_id', -1)
-    chunk_id = chunk.get('chunk_id', -1)
-    field_id = chunk.get('field_id', -1)
-    spw_id = chunk.get('spw_id', -1) 
-    polarization_id = chunk.get('polarization_id', -1)
-    nrows = chunk.get('nrows', 0)
+    try:
+        # Extract chunk metadata using standard field names
+        subms_id = int(chunk.get('subms_id', -1))
+        chunk_id = int(chunk.get('chunk_id', -1))
+        field_id = int(chunk.get('field_id', -1))
+        spw_id = int(chunk.get('spw_id', -1)) 
+        polarization_id = int(chunk.get('polarization_id', -1))
+        nrows = int(chunk.get('nrows', 0))
     
-    # Extract data boundaries and array dimensions
-    row_start = chunk.get('row_start', 0)
-    row_end = chunk.get('row_end', nrows)
-    n_channels = chunk.get('n_channels', 0)
-    n_correlations = chunk.get('n_correlations', 0)
+        # Extract data boundaries and array dimensions
+        row_start = int(chunk.get('row_start', 0))
+        row_end = int(chunk.get('row_end', nrows))
+        n_channels = int(chunk.get('n_channels', 0))
+        n_correlations = int(chunk.get('n_correlations', 0))
 
-    longitude = chunk.get('longitude', 0.0)
-    lambda_ref = chunk.get('lambda_ref', 0.0)
-    ra = chunk.get('ra', 0.0)
-    dec = chunk.get('dec', 0.0)
-    
-    # Get the lists from the chunk
-    antenna1 = chunk.get('antenna1', [])
-    antenna2 = chunk.get('antenna2', [])
-    scan_number = chunk.get('scan_number', [])
-    exposure = chunk.get('exposure', [])
-    interval = chunk.get('interval', [])
-    integration_time_s = chunk.get('integration_time_s', [])
-    time = chunk.get('time', [])
-    u = chunk.get('u', [])
-    v = chunk.get('v', [])
-    w = chunk.get('w', [])
+        longitude = float(chunk.get('longitude', 0.0))
+        lambda_ref = float(chunk.get('lambda_ref', 0.0))
+        ra = float(chunk.get('ra', 0.0))
+        dec = float(chunk.get('dec', 0.0))
+        integration_time_s = float(chunk.get('integration_time_s', 0.0))
 
-    rows = [
-        {
-            'subms_id': subms_id,
-            'chunk_id': chunk_id,
-            'field_id': field_id,
-            'spw_id': spw_id,
-            'polarization_id': polarization_id,
-            'row_start': row_start,
-            'row_end': row_end,
-            'nrows': nrows,
-            'n_channels': n_channels,
-            'n_correlations': n_correlations,
-            'antenna1': a1,
-            'antenna2': a2,
-            'scan_number': sc,
-            'baseline_key': normalize_baseline_key(a1, a2),
-            'longitude': longitude,
-            'lambda_ref': lambda_ref,
-            'ra': ra,
-            'dec': dec,
-            'exposure': ex,
-            'interval': it,
-            'integration_time_s':its,
-            'time': tm,
-            'u': uu,
-            'v': vv,
-            'w': ww
+        # Get the lists from the chunk
+        antenna1 = chunk.get('antenna1', [])
+        antenna2 = chunk.get('antenna2', [])
+        scan_number = chunk.get('scan_number', [])
+        exposure = chunk.get('exposure', [])
+        interval = chunk.get('interval', [])
+        time = chunk.get('time', [])
+        u = chunk.get('u', [])
+        v = chunk.get('v', [])
+        w = chunk.get('w', [])
+
+        expected_shapes = {
+            'visibilities': (nrows, n_channels, n_correlations),
+            'weight': (nrows, n_correlations),
+            'flag': (nrows, n_channels, n_correlations)
         }
-        for a1, a2, sc, ex, it, its, tm, uu, vv, ww in zip(antenna1, antenna2, scan_number, exposure, interval, integration_time_s, time, u, v, w)
-    ]
+
+        visibilities = deserialize_array(chunk.get('visibilities', []), 'visibilities', expected_shapes)
+        weight = deserialize_array(chunk.get('weight', []), 'weight', expected_shapes)
+        flag = deserialize_array(chunk.get('flag', []), 'flag', expected_shapes)
+
+        rows = []
+
+        for i, (a1, a2, sc, ex, it, tm, uu, vv, ww) in enumerate(zip(antenna1, antenna2, scan_number, exposure, interval, time, u, v, w)):
+            vs, wg, fg = extract_data(visibilities, flag, weight, i)
+
+            rows.append(
+                {
+                    'subms_id': subms_id,
+                    'chunk_id': chunk_id,
+                    'field_id': field_id,
+                    'spw_id': spw_id,
+                    'polarization_id': polarization_id,
+                    'row_start': row_start,
+                    'row_end': row_end,
+                    'nrows': nrows,
+                    'n_channels': n_channels,
+                    'n_correlations': n_correlations,
+                    'antenna1': int(a1),
+                    'antenna2': int(a2),
+                    'scan_number': int(sc),
+                    'baseline_key': normalize_baseline_key(a1, a2),
+                    'longitude': longitude,
+                    'lambda_ref': lambda_ref,
+                    'ra': ra,
+                    'dec': dec,
+                    'exposure': float(ex),
+                    'interval': float(it),
+                    'integration_time_s': integration_time_s,
+                    'time': float(tm),
+                    'u': float(uu),
+                    'v': float(vv),
+                    'w': float(ww),
+                    'visibilities': vs,
+                    'weight': wg,
+                    'flag': fg
+                })
+
+        return rows
     
-    return rows
+    except Exception as e:
+        print(f"Error processing chunk: {e}")
+        traceback.print_exc()
 
 
 def deserialize_chunk_to_rows(iterator):
-        """
-        Deserialize MessagePack chunk into list of visibility row structures.
+    """
+    Deserialize MessagePack chunk into list of visibility row structures.
+    
+    Processes compressed binary data from Kafka messages, extracts scientific
+    arrays, and converts complex visibility data to Spark-compatible formats.
+    Handles array decompression, type conversion, and baseline key normalization.
+    
+    Parameters
+    ----------
+    raw_data_bytes : bytes
+        Binary MessagePack data from Kafka message
         
-        Processes compressed binary data from Kafka messages, extracts scientific
-        arrays, and converts complex visibility data to Spark-compatible formats.
-        Handles array decompression, type conversion, and baseline key normalization.
-        
-        Parameters
-        ----------
-        raw_data_bytes : bytes
-            Binary MessagePack data from Kafka message
+    Returns
+    -------
+    list
+        List of tuples representing visibility rows with scientific data
+    """
+    all_rows = []
+
+    for message in iterator:
+        try:
+            raw_data = message.chunk_data
+            chunk = msgpack.unpackb(raw_data, raw=False, strict_map_key=False)
+            chunk_rows = process_chunk(chunk)
+
+            for row in chunk_rows:
+                spark_row = (
+                    row.get('subms_id'),
+                    row.get('chunk_id'),
+                    row.get('field_id'),
+                    row.get('spw_id'),
+                    row.get('polarization_id'),
+                    row.get('row_start'),
+                    row.get('row_end'),
+                    row.get('nrows'),
+                    row.get('n_channels'),
+                    row.get('n_correlations'),
+                    row.get('antenna1'),
+                    row.get('antenna2'),
+                    row.get('scan_number'),
+                    row.get('baseline_key'),
+                    row.get('longitude'),
+                    row.get('lambda_ref'),
+                    row.get('ra'),
+                    row.get('dec'),
+                    row.get('exposure'),
+                    row.get('interval'),
+                    row.get('integration_time_s'),
+                    row.get('time'),
+                    row.get('u'),
+                    row.get('v'),
+                    row.get('w'),
+                    row.get('visibilities', []),
+                    row.get('weight', []),
+                    row.get('flag', [])
+                )
+                all_rows.append(spark_row)
             
-        Returns
-        -------
-        list
-            List of tuples representing visibility rows with scientific data
-        """
-        all_rows = []
-
-        for message in iterator:
-            try:
-                raw_data = message.chunk_data
-                chunk = msgpack.unpackb(raw_data, raw=False, strict_map_key=False)
-                chunk_rows = process_chunk(chunk)
-                
-                print(f"Chunk {chunk.get('chunk_id')} received.")
-
-                for row in chunk_rows:
-                    spark_row = (
-                        row.get('subms_id'),
-                        row.get('chunk_id'),
-                        row.get('field_id'),
-                        row.get('spw_id'),
-                        row.get('polarization_id'),
-                        row.get('row_start'),
-                        row.get('row_end'),
-                        row.get('nrows'),
-                        row.get('n_channels'),
-                        row.get('n_correlations'),
-                        row.get('antenna1'),
-                        row.get('antenna2'),
-                        row.get('scan_number'),
-                        row.get('baseline_key'),
-                        row.get('longitude'),
-                        row.get('lambda_ref'),
-                        row.get('ra'),
-                        row.get('dec'),
-                        row.get('exposure'),
-                        row.get('interval'),
-                        row.get('integration_time_s'),
-                        row.get('time'),
-                        row.get('u'),
-                        row.get('v'),
-                        row.get('w'),
-                        row.get('visibilities', []),
-                        row.get('weight', []),
-                        row.get('flag', [])
-                    )
-                    all_rows.append(spark_row)
-                
-            except Exception as e:
-                print(f"Error deserializing chunk: {e}")
-                continue
-        
-        return iter(all_rows)
+        except Exception as e:
+            print(f"Error deserializing chunk: {e}")
+            continue
+    
+    return iter(all_rows)
 
 
 def process_streaming_batch(df, epoch_id, bda_config):
@@ -236,13 +351,8 @@ def process_streaming_batch(df, epoch_id, bda_config):
     
     start_time = time.time()
     
-    try:        
-        # Calculate and display microbatch processing statistics
-        if df.isEmpty():
-            print(f"Microbatch {epoch_id} is empty.")
-            return
-        
-        print(f"Microbath {epoch_id} processing.")
+    try:                
+        print(f"Microbatch {epoch_id} processing.")
         # Apply distributed BDA pipeline to processed visibility data
         try:
             # apply_bda(df, bda_config)
@@ -255,6 +365,34 @@ def process_streaming_batch(df, epoch_id, bda_config):
     except Exception as e:
         print(f"Error in microbatch {epoch_id}: {e}")
         traceback.print_exc()
+
+
+def normalize_baseline_key(antenna1: int, antenna2: int) -> str:
+    """
+    Generate normalized baseline identifier for consistent grouping operations.
+    
+    Creates standardized baseline key by ordering antenna IDs to ensure
+    bidirectional baselines produce identical keys for proper scientific
+    grouping in BDA processing.
+    
+    Parameters
+    ----------
+    antenna1 : int
+        First antenna identifier in baseline pair
+    antenna2 : int
+        Second antenna identifier in baseline pair
+    subms_id : str, optional
+        SubMS identifier for multi-dataset discrimination, by default None
+        
+    Returns
+    -------
+    str
+        Normalized baseline key in format "min_antenna-max_antenna"
+    """
+    # Order antennas by ID to ensure consistent baseline representation
+    ant_min, ant_max = sorted([antenna1, antenna2])
+    
+    return f"{ant_min}-{ant_max}"
 
 
 def run_consumer(kafka_servers: str = "localhost:9092", 
@@ -309,20 +447,28 @@ def run_consumer(kafka_servers: str = "localhost:9092",
         
         visibility_row_schema = define_visibility_schema()
 
-        # Usar mapPartitions para deserializar cada partición
-        deserialized_rdd = kafka_processed.rdd.mapPartitions(deserialize_chunk_to_rows)
-        deserialized_df = spark.createDataFrame(deserialized_rdd, visibility_row_schema)
-
         config_path = str(project_root / "configs" / "bda_config.json")
         bda_config = load_bda_config(config_path)
 
         def process_batch(df, epoch_id):
-            return process_streaming_batch(df, epoch_id, bda_config)
+            if df.isEmpty():
+                print(f"Microbatch {epoch_id} is empty.")
+                return
+
+            # Usar mapPartitions para deserializar cada partición
+            deserialized_rdd = df.rdd.mapPartitions(deserialize_chunk_to_rows)
+            deserialized_df = spark.createDataFrame(deserialized_rdd, visibility_row_schema)
+
+            """ # Acceder al primer elemento del DataFrame
+            first_row = deserialized_df.first()  # Obtiene la primera fila
+            print(f"First row of microbatch {epoch_id}: {first_row}") """
+
+            process_streaming_batch(deserialized_df, epoch_id, bda_config)
 
         # Create unique checkpoint directory for streaming state management
         checkpoint_path = f"/tmp/spark-bda-{uuid.uuid4().hex[:8]}-{int(time.time())}"
 
-        query = deserialized_df.writeStream \
+        query = kafka_processed.writeStream \
             .foreachBatch(process_batch) \
             .trigger(processingTime='5 seconds') \
             .option("checkpointLocation", checkpoint_path) \
@@ -341,34 +487,6 @@ def run_consumer(kafka_servers: str = "localhost:9092",
     finally:
         spark.stop()
         print("Consumer stopped successfully")
-
-
-def normalize_baseline_key(antenna1: int, antenna2: int) -> str:
-    """
-    Generate normalized baseline identifier for consistent grouping operations.
-    
-    Creates standardized baseline key by ordering antenna IDs to ensure
-    bidirectional baselines produce identical keys for proper scientific
-    grouping in BDA processing.
-    
-    Parameters
-    ----------
-    antenna1 : int
-        First antenna identifier in baseline pair
-    antenna2 : int
-        Second antenna identifier in baseline pair
-    subms_id : str, optional
-        SubMS identifier for multi-dataset discrimination, by default None
-        
-    Returns
-    -------
-    str
-        Normalized baseline key in format "min_antenna-max_antenna"
-    """
-    # Order antennas by ID to ensure consistent baseline representation
-    ant_min, ant_max = sorted([antenna1, antenna2])
-    
-    return f"{ant_min}-{ant_max}"
 
 
 def main():
@@ -440,12 +558,10 @@ Examples:
             kafka_servers=args.kafka_servers,
             topic=args.topic,
             config_path=args.config,
-            enable_event_time=not args.no_event_time,
-            watermark_duration=args.watermark,
             max_offsets_per_trigger=args.max_offsets
         )
     except Exception as e:
-        print(f"❌ Fatal error: {e}")
+        print(f"Fatal error: {e}")
         sys.exit(1)
 
 
