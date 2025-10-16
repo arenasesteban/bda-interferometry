@@ -12,10 +12,6 @@ from typing import Dict, Any
 
 import findspark
 from pyspark.sql import SparkSession
-from pyspark.sql.types import (
-    StructType, StructField, StringType, IntegerType, 
-    FloatType, ArrayType, BooleanType, LongType
-)
 
 # Initialize findspark at module level
 findspark.init()
@@ -40,7 +36,7 @@ def create_spark_session(config_path: str = None) -> SparkSession:
     """
     config = load_config(config_path)
     
-    # Create session with optimized configurations - MEMORY & PERFORMANCE OPTIMIZED
+    # Create session with optimized configurations
     spark = SparkSession.builder \
         .appName(config["spark"]["app_name"]) \
         .master(config["spark"]["master"]) \
