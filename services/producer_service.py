@@ -9,7 +9,6 @@ as compressed chunks to Kafka topics for real-time data transmission.
 """
 
 import sys
-import os
 import msgpack
 import numpy as np
 import zlib
@@ -161,38 +160,16 @@ def load_simulation_config(config_path: str = None) -> Dict[str, Any]:
     -------
     Dict[str, Any]
         Dictionary containing simulation parameters
-    """
-    
-    default_config = {
-        "freq_start": 35.0,
-        "freq_end": 50.0,
-        "n_frequencies": 50,
-        "date_string": "2002-05-10",
-        "observation_time": "1h",
-        "declination": "-45d00m00s",
-        "integration_time": 180.0,
-        "n_point_sources": 15,
-        "point_flux_density": 1.0,
-        "point_spectral_index": 3.0,
-        "include_gaussian": True,
-        "gaussian_flux_density": 10.0,
-        "gaussian_position": [0, 0],
-        "gaussian_minor_radius": 20.0,
-        "gaussian_major_radius": 30.0,
-        "gaussian_theta_angle": 60.0
-    }
-    
+    """    
     if config_path and Path(config_path).exists():
         try:
             with open(config_path, 'r') as f:
                 user_config = json.load(f)
-            # Merge user config with defaults
-            default_config.update(user_config)
         except (json.JSONDecodeError, IOError) as e:
             print(f"Warning: Could not load config file {config_path}: {e}")
             print("Using default configuration.")
     
-    return default_config
+    return user_config
 
 
 def serialize_chunk(chunk: Dict[str, Any]) -> bytes:
@@ -291,7 +268,7 @@ def create_kafka_producer(kafka_servers=None):
 
 def stream_chunks_to_kafka(dataset, producer, topic: str, 
                           base_streaming_delay: float = 0.5,
-                          enable_warmup: bool = True) -> Dict[str, Any]:
+                          enable_warmup: bool = True, longitude: float = -67.7556) -> Dict[str, Any]:
     """
     Advanced streaming with sophisticated backpressure, telemetry, and warm-up.
     
@@ -325,7 +302,6 @@ def stream_chunks_to_kafka(dataset, producer, topic: str,
     Exception
         If streaming encounters critical errors during transmission
     """
-    
     # Initialize metrics and state
     metrics = StreamingMetrics(window_size=100)
     pending_futures = []
@@ -341,7 +317,7 @@ def stream_chunks_to_kafka(dataset, producer, topic: str,
     HIGH_LATENCY_THRESHOLD = 3000.0  # ms (more realistic for acks='all')
     
     try:
-        for chunk in stream_subms_chunks(dataset):
+        for chunk in stream_subms_chunks(dataset, longitude):
             chunk_start_time = time.time()
             metrics.total_chunks += 1
             key = f"{chunk['subms_id']}_{chunk['chunk_id']}"
@@ -511,7 +487,7 @@ def run_producer_service(antenna_config_path: str,
 
         # Create producer and stream chunks with advanced telemetry
         producer = create_kafka_producer()
-        streaming_results = stream_chunks_to_kafka(dataset, producer, topic)
+        streaming_results = stream_chunks_to_kafka(dataset, producer, topic, sim_config["longitude"])
         
         return {
             'success': True,

@@ -11,9 +11,11 @@ optimized for real-time streaming operations via messaging systems.
 
 import numpy as np
 from typing import Dict, Any, Generator
+import astropy.units as u
+from astropy.coordinates import SkyCoord
 
 
-def stream_subms_chunks(dataset) -> Generator[Dict[str, Any], None, None]:
+def stream_subms_chunks(dataset, longitude) -> Generator[Dict[str, Any], None, None]:
     """
     Stream chunks from SubMS objects in the dataset's ms_list.
     
@@ -39,14 +41,24 @@ def stream_subms_chunks(dataset) -> Generator[Dict[str, Any], None, None]:
     if not hasattr(dataset, 'ms_list') or dataset.ms_list is None:
         raise ValueError("No ms_list found in dataset")
     
+    lambda_ref = dataset.spws.lambda_ref.value
+    
+    ra_deg = dataset.fields.ref_dirs.ra[0]
+    dec_deg = dataset.fields.ref_dirs.dec[0]
+
+    sky_coord = SkyCoord(ra=ra_deg, dec=dec_deg, unit=(u.deg, u.deg), frame='icrs')
+
+    ra = sky_coord.ra.rad
+    dec = sky_coord.dec.rad
+
     for subms in dataset.ms_list:
         if subms is None or subms.visibilities is None:
             continue
             
-        yield from _extract_subms_chunks(subms)
+        yield from _extract_subms_chunks(subms, longitude, lambda_ref, ra, dec)
 
 
-def _extract_subms_chunks(subms) -> Generator[Dict[str, Any], None, None]:
+def _extract_subms_chunks(subms, longitude, lambda_ref, ra, dec) -> Generator[Dict[str, Any], None, None]:
     """
     Extract chunks from a single SubMS object.
     
@@ -81,7 +93,9 @@ def _extract_subms_chunks(subms) -> Generator[Dict[str, Any], None, None]:
         
         chunk = _extract_chunk_data(
             subms, vis, chunk_id, start_row, end_row, 
-            n_channels, n_correlations
+            n_channels, n_correlations,
+            longitude,
+            lambda_ref, ra, dec,
         )
         
         yield chunk
@@ -115,7 +129,7 @@ def _get_optimal_chunk_size(vis_set) -> int:
 
 
 def _extract_chunk_data(subms, vis_set, chunk_id: int, start_row: int, end_row: int,
-                       n_channels: int, n_correlations: int) -> Dict[str, Any]:
+                       n_channels: int, n_correlations: int, longitude, lambda_ref, ra, dec) -> Dict[str, Any]:
     """
     Extract raw data for a specific chunk range.
     
@@ -155,28 +169,37 @@ def _extract_chunk_data(subms, vis_set, chunk_id: int, start_row: int, end_row: 
         'field_id': subms.field_id,
         'spw_id': subms.spw_id,
         'polarization_id': subms.polarization_id,
+        
         'row_start': start_row,
         'row_end': end_row,
         'nrows': chunk_size,
+        
         'n_channels': n_channels,
         'n_correlations': n_correlations,
         
-        # Timing information (available in dataset)
-        'exposure': _safe_compute_slice(vis_set.dataset.EXPOSURE, start_row, end_row),   # Integration time per row (seconds)
-        'interval': _safe_compute_slice(vis_set.dataset.INTERVAL, start_row, end_row),   # Time interval per row (seconds)
-        'integration_time_s': _extract_integration_time(vis_set, start_row, end_row),    # Median integration time for chunk
+        'antenna1': _safe_compute_slice(vis_set.antenna1, start_row, end_row),
+        'antenna2': _safe_compute_slice(vis_set.antenna2, start_row, end_row),
+        'scan_number': _safe_compute_slice(vis_set.scan_number, start_row, end_row),
+        
+        'longitude': longitude,
+        'lambda_ref': lambda_ref,
+        'ra': ra,
+        'dec': dec,
+
+        # Timing information
+        'exposure': _safe_compute_slice(vis_set.dataset.EXPOSURE, start_row, end_row),
+        'interval': _safe_compute_slice(vis_set.dataset.INTERVAL, start_row, end_row),
+        'integration_time_s': _extract_integration_time(vis_set, start_row, end_row),
+        
+        'time': _safe_compute_slice(vis_set.time, start_row, end_row),
+        'u': _safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=0),
+        'v': _safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=1),
+        'w': _safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=2),
         
         # Essential scientific data arrays
-        'u': _safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=0),          # UVW coordinates per row
-        'v': _safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=1),          # (critical for baseline length calc)
-        'w': _safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=2),
-        'visibilities': _safe_compute_slice(vis_set.data, start_row, end_row),           # Main scientific data [nrows, nchans, npols]
-        'weight': _safe_compute_slice(vis_set.weight, start_row, end_row),               # Statistical weights (critical for BDA)
-        'time': _safe_compute_slice(vis_set.time, start_row, end_row),                   # Individual timestamps per row (critical for windowing)
-        'antenna1': _safe_compute_slice(vis_set.antenna1, start_row, end_row),           # Baseline definition (critical)
-        'antenna2': _safe_compute_slice(vis_set.antenna2, start_row, end_row),           # Baseline definition (critical)  
-        'scan_number': _safe_compute_slice(vis_set.scan_number, start_row, end_row),     # Observation period identifier (critical for BDA grouping)
-        'flag': _safe_compute_slice(vis_set.flag, start_row, end_row),                   # Data quality flags
+        'visibilities': _safe_compute_slice(vis_set.data, start_row, end_row),
+        'weight': _safe_compute_slice(vis_set.weight, start_row, end_row),
+        'flag': _safe_compute_slice(vis_set.flag, start_row, end_row),
     }
 
 
