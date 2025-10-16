@@ -43,8 +43,8 @@ def stream_subms_chunks(dataset, longitude) -> Generator[Dict[str, Any], None, N
     
     lambda_ref = dataset.spws.lambda_ref.value
     
-    ra_deg = dataset.fields.ref_dirs.ra[0]
-    dec_deg = dataset.fields.ref_dirs.dec[0]
+    ra_deg = dataset.field.ref_dirs.ra[0]
+    dec_deg = dataset.field.ref_dirs.dec[0]
 
     sky_coord = SkyCoord(ra=ra_deg, dec=dec_deg, unit=(u.deg, u.deg), frame='icrs')
 
@@ -128,6 +128,22 @@ def _get_optimal_chunk_size(vis_set) -> int:
         return min(1000, vis_set.nrows)
 
 
+def to_simple_array(np_array):
+    """Convert NumPy array to simple Python list for clean serialization."""
+    if np_array is None:
+        return []
+    try:
+        # Asegurar que es un array NumPy
+        if not isinstance(np_array, np.ndarray):
+            np_array = np.array(np_array)
+        
+        # Convertir a lista Python simple
+        return np_array.tolist()
+    except Exception as e:
+        print(f"Could not convert array to list: {e}")
+        return []
+    
+
 def _extract_chunk_data(subms, vis_set, chunk_id: int, start_row: int, end_row: int,
                        n_channels: int, n_correlations: int, longitude, lambda_ref, ra, dec) -> Dict[str, Any]:
     """
@@ -177,25 +193,25 @@ def _extract_chunk_data(subms, vis_set, chunk_id: int, start_row: int, end_row: 
         'n_channels': n_channels,
         'n_correlations': n_correlations,
         
-        'antenna1': _safe_compute_slice(vis_set.antenna1, start_row, end_row),
-        'antenna2': _safe_compute_slice(vis_set.antenna2, start_row, end_row),
-        'scan_number': _safe_compute_slice(vis_set.scan_number, start_row, end_row),
-        
+        'antenna1': to_simple_array(_safe_compute_slice(vis_set.antenna1, start_row, end_row)),
+        'antenna2': to_simple_array(_safe_compute_slice(vis_set.antenna2, start_row, end_row)),
+        'scan_number': to_simple_array(_safe_compute_slice(vis_set.scan_number, start_row, end_row)),
+
         'longitude': longitude,
         'lambda_ref': lambda_ref,
         'ra': ra,
         'dec': dec,
 
         # Timing information
-        'exposure': _safe_compute_slice(vis_set.dataset.EXPOSURE, start_row, end_row),
-        'interval': _safe_compute_slice(vis_set.dataset.INTERVAL, start_row, end_row),
+        'exposure': to_simple_array(_safe_compute_slice(vis_set.dataset.EXPOSURE, start_row, end_row)),
+        'interval': to_simple_array(_safe_compute_slice(vis_set.dataset.INTERVAL, start_row, end_row)),
         'integration_time_s': _extract_integration_time(vis_set, start_row, end_row),
-        
-        'time': _safe_compute_slice(vis_set.time, start_row, end_row),
-        'u': _safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=0),
-        'v': _safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=1),
-        'w': _safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=2),
-        
+
+        'time': to_simple_array(_safe_compute_slice(vis_set.time, start_row, end_row)),
+        'u': to_simple_array(_safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=0)),
+        'v': to_simple_array(_safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=1)),
+        'w': to_simple_array(_safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=2)),
+
         # Essential scientific data arrays
         'visibilities': _safe_compute_slice(vis_set.data, start_row, end_row),
         'weight': _safe_compute_slice(vis_set.weight, start_row, end_row),
