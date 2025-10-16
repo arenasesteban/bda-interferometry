@@ -1,27 +1,13 @@
 {
-  "description": "BDA configuration for ALMA Band 1 observations - Cleaned version",
   "decorr_factor": 0.95,
   "frequency_hz": 42500000000.0,
   "declination_deg": -45.0, 
+
   "safety_factor": 0.8,
-  "decorrelation_time_s": 10.0,
-  "baseline_length_thresholds": {
-    "short_baseline_m": 100,
-    "long_baseline_m": 1000
-  },
-  "window_scaling_factors": {
-    "short_baseline": 2.0,
-    "medium_baseline": 1.0, 
-    "long_baseline": 0.5
-  },
-  "memory_management": {
-    "max_samples_per_window": 1000,
-    "flush_interval_s": 30
-  },
-  "processing_mode": "incremental_windows",
-  "bda_algorithms": {
-    "frequency_decorrelation": true,
-    "time_decorrelation": true,
-    "baseline_dependent": true
-  }
+  "correlator_dump_s": 0.14,
+  "field_offset_deg": 2.0,
+  "site_lat_deg": -30.7,
+
+  "min_window_s": 1.0,
+  "max_window_s": 180.0
 }
