@@ -13,17 +13,16 @@ Key Functions
 -------------
 process_rows_incrementally : Main streaming BDA processor with online windows
 complete_bda_window : Weighted averaging and window completion
-get_decorrelation_time_for_sample : Physics-based window sizing per visibility sample
+get_decorrelation_time : Physics-based window sizing per visibility sample
 """
 
 import numpy as np
-from typing import Dict, Any, Iterator, Tuple
+from typing import Dict, Any, Tuple
 
-# Import corrected physics from bda_core
-from .bda_core import calculate_optimal_averaging_time, calculate_baseline_length
+from .bda_core import calculate_optimal_averaging_time, calculate_decorrelation_time
 
 
-def get_decorrelation_time_for_sample(u: float, v: float, bda_config: Dict[str, Any]) -> float:
+def get_decorrelation_time(u: float, v: float, bda_config: Dict[str, Any]) -> float:
     """
     Calculate decorrelation time for a single visibility sample using physics.
     
@@ -51,13 +50,11 @@ def get_decorrelation_time_for_sample(u: float, v: float, bda_config: Dict[str, 
     """
     frequency_hz = bda_config.get('frequency_hz', 700e6)
     
-    # Use corrected physics from bda_core
     decorr_time = calculate_optimal_averaging_time(
         u=u, 
         v=v,
         frequency_hz=frequency_hz,
-        config=bda_config,
-        input_units='wavelengths'  # Explicit units - no auto-detection
+        bda_config=bda_config,
     )
     
     return decorr_time
@@ -122,7 +119,7 @@ def create_bda_window(start_time: float, decorr_time: float) -> Dict[str, Any]:
     return {
         'start_time': start_time,
         'end_time': start_time + decorr_time,
-        'decorr_time': decorr_time,  # Store for adaptive logic
+        'decorr_time': decorr_time,
         'visibilities': [],
         'weights': [],
         'flags': [],
@@ -182,7 +179,7 @@ def should_close_window(window: Dict[str, Any], current_time: float,
     if time_since_start >= new_decorr_time:
         return True
     
-    # Criterion 2: Large time gap since last sample (data sparsity)
+    # Criterion 2: Large time gap since last sample
     if window['times']:
         time_since_last = current_time - max(window['times'])
         # Use smaller of current and new decorrelation times for gap detection
@@ -196,8 +193,8 @@ def should_close_window(window: Dict[str, Any], current_time: float,
                                             new_decorr_time, tolerance=0.3):
             return True
     
-    # Criterion 4: Window buffer too large (memory management)
-    max_samples_per_window = 1000  # Configurable limit
+    # Criterion 4: Window buffer too large
+    max_samples_per_window = 1000
     if window['n_samples'] >= max_samples_per_window:
         return True
     
@@ -220,14 +217,10 @@ def complete_bda_window(window, baseline_key):
         weight_array = np.array(window['weights'])        
         flag_array = np.array(window['flags'])
         
-        # Debug: Log array shapes for troubleshooting
-        print(f"🔍 Debug shapes - vis: {vis_array.shape}, weight: {weight_array.shape}, flag: {flag_array.shape}")
-        
         # Weighted averaging with flag masking
         if vis_array.size > 0 and weight_array.size > 0:
             valid_mask = ~flag_array if flag_array.size > 0 else np.ones_like(vis_array, dtype=bool)
             
-            # ROBUST SHAPE HANDLING
             target_shape = vis_array.shape
             n_samples = target_shape[0]
             
@@ -239,34 +232,26 @@ def complete_bda_window(window, baseline_key):
                     if weight_array.shape == (n_samples, n_channels * n_corr):
                         # Reshape from (samples, channels*corr) to (samples, channels, corr)
                         weight_array = weight_array.reshape(n_samples, n_channels, n_corr)
-                        print(f"✅ Reshaped weights from (samples, flat) to (samples, channels, corr)")
                         
                     elif weight_array.shape == (n_samples, n_corr):
                         # Broadcast from (samples, corr) to (samples, channels, corr)
                         weight_array = np.broadcast_to(weight_array[:, np.newaxis, :], target_shape)
-                        print(f"✅ Broadcasted weights from (samples, corr) to (samples, channels, corr)")
                         
                     elif weight_array.shape == (n_samples,):
                         # Broadcast from (samples,) to (samples, channels, corr)
                         weight_array = np.broadcast_to(weight_array[:, np.newaxis, np.newaxis], target_shape)
-                        print(f"✅ Broadcasted weights from (samples,) to (samples, channels, corr)")
                         
                     else:
-                        # Fallback: try direct broadcasting
                         try:
                             weight_array = np.broadcast_to(weight_array, target_shape)
-                            print(f"✅ Direct broadcast successful")
                         except ValueError:
-                            # Last resort: use ones with same shape
-                            print(f"⚠️ Broadcasting failed, using uniform weights")
                             weight_array = np.ones_like(vis_array, dtype=float)
                             
-                elif len(target_shape) == 2:  # (samples, correlations)
+                elif len(target_shape) == 2:
                     n_samples, n_corr = target_shape
                     
                     if weight_array.shape == (n_samples,):
                         weight_array = np.broadcast_to(weight_array[:, np.newaxis], target_shape)
-                        print(f"✅ Broadcasted weights 1D to 2D")
                     else:
                         weight_array = np.broadcast_to(weight_array, target_shape)
             
@@ -294,8 +279,6 @@ def complete_bda_window(window, baseline_key):
             weight_total = total_weight
             flag_combined = np.all(flag_array, axis=0) if flag_array.size > 0 else np.zeros_like(vis_averaged, dtype=bool)
             
-            print(f"✅ BDA window completed: {n_samples} samples → 1 averaged result")
-            
         else:
             vis_averaged = np.array([])
             weight_total = np.array([])
@@ -322,10 +305,10 @@ def complete_bda_window(window, baseline_key):
             'w_avg': w_avg,
             'n_input_rows': window['n_samples'],
             'window_duration_s': actual_duration,
-            'compression_ratio': float(window['n_samples']),  # n_samples -> 1 result (per window)
+            'compression_ratio': float(window['n_samples']),
             'window_id': f"{baseline_key}_{int(window['start_time'])}",
             'decorrelation_time_used': actual_duration,
-            'decorrelation_time_planned': planned_duration,  # For analysis
+            'decorrelation_time_planned': planned_duration,
             'window_efficiency': actual_duration / planned_duration if planned_duration > 0 else 1.0
         }
         
@@ -467,73 +450,7 @@ def extract_flag_array(row):
         return np.array([], dtype=bool)
 
 
-def validate_consumer_row_format(row, baseline_key: Tuple[int, int, int] = None) -> bool:
-    """
-    Validate that Spark row contains expected fields from consumer service.
-    
-    This function centralizes validation of consumer data format to catch
-    interface changes early and provide clear error messages.
-    
-    Parameters
-    ----------
-    row : pyspark.sql.Row
-        Spark row from consumer service
-    baseline_key : Tuple[int, int, int], optional
-        Baseline identifier for error reporting
-        
-    Returns
-    -------
-    bool
-        True if row format is valid, False otherwise
-        
-    Notes
-    -----
-    Add/remove field checks here if consumer service changes data format.
-    This provides a single place to manage consumer interface dependencies.
-    """
-    required_fields = {
-        'antenna1': int,
-        'antenna2': int, 
-        'scan_number': int,
-        'time': (int, float),
-        'u': (int, float),
-        'v': (int, float),
-        'w': (int, float),
-        'visibilities': list,
-        'weight': list,
-        'flag': list,
-        'n_channels': int,
-        'n_correlations': int
-    }
-    
-    missing_fields = []
-    invalid_types = []
-    
-    for field, expected_type in required_fields.items():
-        if not hasattr(row, field):
-            missing_fields.append(field)
-            continue
-            
-        field_value = getattr(row, field)
-        if field_value is None:
-            missing_fields.append(f"{field} (None)")
-            continue
-            
-        if not isinstance(field_value, expected_type):
-            invalid_types.append(f"{field}: expected {expected_type}, got {type(field_value)}")
-    
-    if missing_fields or invalid_types:
-        baseline_str = f" for {baseline_key}" if baseline_key else ""
-        if missing_fields:
-            print(f"⚠️ Missing fields{baseline_str}: {missing_fields}")
-        if invalid_types:
-            print(f"⚠️ Invalid types{baseline_str}: {invalid_types}")
-        return False
-    
-    return True
-
-
-def process_rows_incrementally(row_iterator, bda_config):
+def process_rows(row_iterator, frecuency_hz, decorr_factor, field_offset_deg):
     """
     Process visibility rows incrementally using decorrelation windows.
     
@@ -568,14 +485,17 @@ def process_rows_incrementally(row_iterator, bda_config):
     
     for row in row_iterator:
         # Extract baseline info
-        baseline_key = (int(row.antenna1), int(row.antenna2), int(row.scan_number))
+        baseline_key = row.baseline_key
         current_time = float(row.time)
         
-        # Extract UV coordinates (assuming already in wavelengths from consumer)
+        # Extract UV coordinates
         u, v, w = float(row.u), float(row.v), float(row.w)
+        u_lambda, v_lambda, w_lambda = u / frecuency_hz, v / frecuency_hz, w / frecuency_hz
+
+        
         
         # Calculate physics-based decorrelation time using corrected equations
-        decorr_time = get_decorrelation_time_for_sample(u, v, bda_config)
+        decorr_time = calculate_decorrelation_time()
         
         # Check if existing window should be closed
         if baseline_key in active_windows:
@@ -583,31 +503,19 @@ def process_rows_incrementally(row_iterator, bda_config):
             if should_close_window(window, current_time, decorr_time, baseline_key):
                 # Complete and yield window
                 result = complete_bda_window(window, baseline_key)
-                
-                # Log window completion for monitoring
-                if window['n_samples'] > 0:
-                    compression = window['n_samples'] / 1.0  # n samples -> 1 BDA result
-                    print(f"🔄 Window closed: {baseline_key} | {window['n_samples']} samples → 1 result (compression: {compression:.1f}:1)")
-                
                 yield result
-                # Remove completed window (frees memory)
+
+                # Remove completed window
                 del active_windows[baseline_key]
         
         # Create new window if needed
         if baseline_key not in active_windows:
             active_windows[baseline_key] = create_bda_window(current_time, decorr_time)
         
-        # Validate row format before processing (optional - can disable in production)
-        if not validate_consumer_row_format(row, baseline_key):
-            print(f"⚠️ Invalid row format for {baseline_key}: skipping sample")
-            continue  # Skip this row
-        
         # Extract arrays from row
         vis_array = extract_visibility_array(row)
         weight_array = extract_weight_array(row)
         flag_array = extract_flag_array(row)
-        
-
         
         # Add sample to active window
         window = active_windows[baseline_key]
@@ -618,4 +526,3 @@ def process_rows_incrementally(row_iterator, bda_config):
         if window['n_samples'] > 0:
             result = complete_bda_window(window, baseline_key)
             yield result
-

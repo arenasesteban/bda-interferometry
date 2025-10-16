@@ -22,23 +22,20 @@ apply_distributed_bda_pipeline : Main orchestration function for incremental str
 convert_bda_result_to_spark_tuple : Converts streaming window results to Spark format
 """
 
-import time
 import logging
-import traceback
 import numpy as np
 from pyspark.sql.functions import (
-    explode, col, count, sum as spark_sum, avg, max as spark_max, countDistinct
+    col, count, sum as spark_sum, avg, max as spark_max, countDistinct
 )
 from pyspark.sql.types import (
     StructType, StructField, StringType, IntegerType, FloatType, 
     DoubleType, ArrayType
 )
 
-from .bda_processor import process_rows_incrementally
+from .bda_processor import process_rows
 
 
-def apply_distributed_bda_pipeline(df, bda_config, enable_event_time=False, 
-                                  watermark_duration="2 minutes", config_file_path=None):
+def apply_bda(df, bda_config):
     """
     Execute incremental streaming BDA pipeline with decorrelation windows.
     
@@ -72,64 +69,32 @@ def apply_distributed_bda_pipeline(df, bda_config, enable_event_time=False,
     """
     logger = logging.getLogger(__name__)
     
-    logger.info("🚀 Starting incremental BDA pipeline")
-    logger.info("📊 Processing mode: streaming windows (mapPartitions)")
-    logger.info("🧠 Memory usage: constant per window (not per baseline)")
-    
     try:
-        
         # Use scientific data prepared by consumer service
-        logger.info("Using scientific data already prepared by consumer service...")
         scientific_df = df
         
-        logger.info("Ready to process scientific data with incremental BDA")
+        # Partition by baseline for streaming
+        scientific_df_partitioned = scientific_df.repartition(4, col("antenna1"), col("antenna2"), col("scan_number"))
         
-        # Watermarking for streaming
-        if enable_event_time:
-            logger.info(f"Applying watermark for late data: {watermark_duration}")
-            scientific_df = scientific_df.withWatermark("time_timestamp", watermark_duration)
-        else:
-            logger.info("Watermarking disabled")
-        
-        # Partition by baseline for streaming efficiency
-        logger.info("Partitioning data for incremental BDA processing...")
-        
-        # Get optimized Spark configuration for BDA
-        spark_config = get_optimized_spark_config(bda_config, scientific_df.sparkSession)
-        num_partitions = spark_config['num_partitions']
-        
-        logger.info(f"Using optimized BDA partitioning: {num_partitions} partitions")
-        scientific_df_partitioned = scientific_df.repartition(num_partitions, col("antenna1"), col("antenna2"), col("scan_number"))
-        
-        # Sort within partitions by time (maintains temporal order for decorrelation windows)
+        # Sort within partitions by time
         sorted_df = scientific_df_partitioned.sortWithinPartitions("time")
         
-        logger.info("Applying incremental BDA with decorrelation windows...")
-        
         # Define incremental BDA processing function
-        def incremental_bda_partition(partition_iterator):
-            """Process partition with incremental BDA windows - memory efficient"""
+        def apply_bda_to_partition(partition_iterator):
+            """Process partition with incremental BDA windows"""
             results = []
             
-            # FIXED: partition_iterator already yields Row objects directly
-            # No need for nested generator - use partition_iterator as row iterator
-            for bda_result in process_rows_incrementally(partition_iterator, bda_config):
+            for bda_result in process_rows(partition_iterator, bda_config):
                 result_tuple = convert_bda_result_to_spark_tuple(bda_result)
                 results.append(result_tuple)
             
             return iter(results)
         
-        logger.info("Executing incremental BDA processing...")
-        bda_results_rdd = sorted_df.rdd.mapPartitions(incremental_bda_partition)
+        bda_results_rdd = sorted_df.rdd.mapPartitions(apply_bda_to_partition)
         
         # Create DataFrame from RDD with proper schema
         spark_session = df.sparkSession
         bda_results_df = spark_session.createDataFrame(bda_results_rdd, get_bda_result_schema())
-        
-        logger.info("Distributed BDA applied to all groups")
-        
-        # Final distributed aggregations
-        logger.info("Calculating final distributed KPIs...")
         
         # Calculate distributed statistics from BDA results
         final_kpis = (bda_results_df
@@ -151,9 +116,6 @@ def apply_distributed_bda_pipeline(df, bda_config, enable_event_time=False,
         max_compression_ratio = float(final_kpis["max_compression_ratio"] or 1.0)
         unique_groups = int(final_kpis["unique_groups_processed"] or 0)
         avg_window_duration = float(final_kpis["avg_window_duration_s"] or 0.0)
-        
-        # Generate final results
-        logger.info("Generating final distributed BDA results...")
         
         # Create results without expensive collect() operations
         results_data = [{
@@ -183,19 +145,8 @@ def apply_distributed_bda_pipeline(df, bda_config, enable_event_time=False,
         # Validate BDA results
         validation_results = validate_bda_results(bda_results_df, logger)
         
-        # Final result logging
-        logger.info(f"INCREMENTAL BDA PIPELINE COMPLETED")
-        logger.info(f"   Input rows: {total_input_rows}")
-        logger.info(f"   BDA windows: {total_windows}")
-        logger.info(f"   Average compression: {avg_compression_ratio:.2f}:1")
-        logger.info(f"   Maximum compression: {max_compression_ratio:.2f}:1")
-        logger.info(f"   Groups processed: {unique_groups}")
-        logger.info(f"   Average window duration: {avg_window_duration:.2f}s")
-        logger.info(f"   Window efficiency: {validation_results.get('avg_window_efficiency', 'N/A'):.1%}")
-        logger.info(f"   Mode: INCREMENTAL WINDOWS (Physics-based)")
-        
         return {
-            'results': bda_results_df,  # Complete DataFrame with BDA results
+            'results': bda_results_df,
             'kpis': kpis_df,
             'config': bda_config,
             'spark_config': {
@@ -207,18 +158,10 @@ def apply_distributed_bda_pipeline(df, bda_config, enable_event_time=False,
                 'max_compression_ratio': float(max_compression_ratio),
                 'pipeline_status': 'complete_incremental_bda_pipeline',
                 'architecture': 'spark_mappartitions_decorrelation_windows',
-                'partitions_used': spark_config['num_partitions'],
-                'spark_parallelism': spark_config['default_parallelism'],
-                'executor_cores': spark_config['total_cores'],
-                'num_executors': spark_config['num_executors']
             }
         }
         
-    except Exception as e:
-        logger.error(f"ERROR IN DISTRIBUTED PIPELINE")
-        logger.error(f"   Error: {e}")
-        logger.error(traceback.format_exc())
-        
+    except Exception as e:        
         # Safe fallback
         spark_session = df.sparkSession
         empty_results_df = spark_session.createDataFrame([], get_empty_results_schema())
@@ -413,57 +356,6 @@ def convert_bda_result_to_spark_tuple(bda_result):
         float(time.time()),                                  # processing_timestamp
         'incremental_v1'                                     # bda_config_hash
     )
-
-
-def get_optimized_spark_config(bda_config, spark_session):
-    """
-    Get optimized Spark configuration parameters for BDA processing.
-    
-    Determines optimal partitioning, memory settings, and parallelism based on
-    BDA configuration and available Spark resources.
-    
-    Parameters
-    ----------
-    bda_config : dict
-        BDA configuration dictionary
-    spark_session : pyspark.sql.SparkSession
-        Active Spark session
-        
-    Returns
-    -------
-    dict
-        Optimized Spark configuration for BDA processing
-    """
-    try:
-        # Get available parallelism
-        default_parallelism = spark_session.sparkContext.defaultParallelism
-        total_cores = spark_session.sparkContext.getConf().get("spark.executor.cores", "1")
-        num_executors = spark_session.sparkContext.getConf().get("spark.executor.instances", "1")
-        
-        # Calculate optimal partitions for BDA (baseline grouping works best with moderate partitioning)
-        optimal_partitions = bda_config.get('bda_spark_partitions', None)
-        if optimal_partitions is None:
-            # Use 2-4x parallelism for good load balancing with baseline grouping
-            optimal_partitions = min(default_parallelism * 2, 200)  # Cap at 200 for efficiency
-        
-        logging.info(f"Spark config - Cores: {total_cores}, Executors: {num_executors}, "
-                    f"Default parallelism: {default_parallelism}, BDA partitions: {optimal_partitions}")
-        
-        return {
-            'num_partitions': optimal_partitions,
-            'default_parallelism': default_parallelism,
-            'total_cores': int(total_cores),
-            'num_executors': int(num_executors)
-        }
-        
-    except Exception as e:
-        logging.warning(f"Could not determine optimal Spark config: {e}")
-        return {
-            'num_partitions': 4,  # Safe fallback
-            'default_parallelism': 4,
-            'total_cores': 1,
-            'num_executors': 1
-        }
 
 
 def validate_bda_results(bda_results_df, logger=None):

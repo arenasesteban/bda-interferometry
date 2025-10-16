@@ -9,8 +9,7 @@ try:
     from .bda_core import apply_bda_to_group
     from .bda_processor import process_group_with_bda
     from .bda_config import (
-        load_bda_config_with_fallback,
-        get_default_bda_config
+        load_bda_config
     )
     
 except ImportError as e:
@@ -20,7 +19,7 @@ except ImportError as e:
     def process_group_with_bda(*args, **kwargs):
         return []
     
-    def load_bda_config_with_fallback(*args, **kwargs):
+    def load_bda_config(*args, **kwargs):
         return {'decorr_factor': 0.95, 'frequency_hz': 42.5e9, 'declination_deg': -45.0}
 
 __all__ = [
@@ -31,6 +30,6 @@ __all__ = [
     'process_group_with_bda',
     
     # Configuration functions
-    'load_bda_config_with_fallback',
+    'load_bda_config',
     'get_default_bda_config'
 ]
