@@ -21,8 +21,8 @@ import uuid
 
 from pyspark.sql.functions import udf, explode, col, from_unixtime, to_timestamp
 from pyspark.sql.types import (
-    StringType, StructType, StructField, IntegerType, 
-    DoubleType, ArrayType
+    StringType, StructType, StructField, IntegerType,
+    DoubleType, ArrayType, BooleanType
 )
 
 # Add src directory to path
@@ -36,12 +36,6 @@ from bda.bda_integration import apply_bda
 
 
 def define_visibility_schema():
-    """
-    Defines the schema for visibility data to be used in Spark.
-    
-    Returns:
-        StructType: Schema that describes the visibility data structure.
-    """
     return StructType([
         StructField("subms_id", IntegerType(), True),
         StructField("chunk_id", IntegerType(), True),
@@ -79,27 +73,10 @@ def define_visibility_schema():
         # weight: [corr] -> Array de Double
         StructField("weight", ArrayType(DoubleType()), True),
         # flag: [chan][corr] con 0/1 -> Array de Array de Boolean
-        StructField("flag", ArrayType(ArrayType(IntegerType())), True)
+        StructField("flag", ArrayType(ArrayType(BooleanType())), True)
     ])
 
 def deserialize_array(field_dict, field_name, expected_shapes):
-    """
-    Deserialize NumPy array from MessagePack serialized format.
-    
-    Handles both regular and compressed NumPy arrays from producer.
-    
-    Parameters
-    ----------
-    field_dict : dict
-        Dictionary containing 'type' and 'data' keys
-    field_name : str
-        Name of the field for error reporting
-        
-    Returns
-    -------
-    numpy.ndarray
-        Deserialized NumPy array
-    """
     try:
         if not isinstance(field_dict, dict):
             print(f"Error {field_name} is not a dict: {type(field_dict)}")
@@ -143,31 +120,39 @@ def deserialize_array(field_dict, field_name, expected_shapes):
     except Exception as e:
         print(f"Error deserializing {field_name}: {e}")
         traceback.print_exc()
-        return np.array([])
+        raise
     
+
 def extract_data(visibilities, flag, weight, i):
-    row_visibilities = visibilities[i] if i < len(visibilities) else np.array([])
-    row_weight = weight[i] if i < len(weight) else np.array([])
-    row_flag = flag[i] if i < len(flag) else np.array([])
+    try:
+        row_visibilities = visibilities[i] if i < len(visibilities) else np.array([])
+        row_weight = weight[i] if i < len(weight) else np.array([])
+        row_flag = flag[i] if i < len(flag) else np.array([])
 
-    if row_visibilities.size > 0 and np.iscomplexobj(row_visibilities):
+        if row_visibilities.size > 0 and np.iscomplexobj(row_visibilities):
 
-        vis_real_imag = []
-        for chan in range(row_visibilities.shape[0]):
-            chan_data = []
-            for corr in range(row_visibilities.shape[1]):
-                complex_val = row_visibilities[chan, corr]
-                chan_data.append([float(complex_val.real), float(complex_val.imag)])
-            vis_real_imag.append(chan_data)
-        row_vis_list = vis_real_imag
-    else:
-        row_vis_list = []
+            vis_real_imag = []
+            for chan in range(row_visibilities.shape[0]):
+                chan_data = []
+                for corr in range(row_visibilities.shape[1]):
+                    complex_val = row_visibilities[chan, corr]
+                    chan_data.append([float(complex_val.real), float(complex_val.imag)])
+                vis_real_imag.append(chan_data)
+            row_vis_list = vis_real_imag
+        else:
+            row_vis_list = []
 
-    # Convertir weight y flag a listas Python
-    row_weight_list = row_weight.tolist() if row_weight.size > 0 else []
-    row_flag_list = row_flag.astype(int).tolist() if row_flag.size > 0 else []
+        # Convertir weight y flag a listas Python
+        row_weight_list = row_weight.tolist() if row_weight.size > 0 else []
+        row_flag_list = row_flag.astype(int).tolist() if row_flag.size > 0 else []
 
-    return row_vis_list, row_weight_list, row_flag_list
+        return row_vis_list, row_weight_list, row_flag_list
+
+    except Exception as e:
+        print(f"Error extracting data for row {i}: {e}")
+        traceback.print_exc()
+        raise
+
 
 def process_chunk(chunk):
     try:
@@ -254,26 +239,10 @@ def process_chunk(chunk):
     except Exception as e:
         print(f"Error processing chunk: {e}")
         traceback.print_exc()
+        raise
 
 
 def deserialize_chunk_to_rows(iterator):
-    """
-    Deserialize MessagePack chunk into list of visibility row structures.
-    
-    Processes compressed binary data from Kafka messages, extracts scientific
-    arrays, and converts complex visibility data to Spark-compatible formats.
-    Handles array decompression, type conversion, and baseline key normalization.
-    
-    Parameters
-    ----------
-    raw_data_bytes : bytes
-        Binary MessagePack data from Kafka message
-        
-    Returns
-    -------
-    list
-        List of tuples representing visibility rows with scientific data
-    """
     all_rows = []
 
     for message in iterator:
@@ -314,51 +283,28 @@ def deserialize_chunk_to_rows(iterator):
                     row.get('flag', [])
                 )
                 all_rows.append(spark_row)
-            
+             
         except Exception as e:
             print(f"Error deserializing chunk: {e}")
-            continue
+            traceback.print_exc()
+            raise
     
     return iter(all_rows)
 
-
-def process_streaming_batch(df, epoch_id, bda_config):
-    """
-    Process microbatch with incremental BDA using decorrelation windows.
-    
-    Uses memory-efficient incremental BDA that processes visibility data in small
-    decorrelation-time windows rather than accumulating entire baselines in memory.
-    This approach maintains constant RAM usage regardless of baseline size.
-    
-    Parameters
-    ----------
-    df : pyspark.sql.DataFrame
-        DataFrame containing deserialized visibility rows ready for BDA processing
-    epoch_id : int
-        Unique identifier for the current microbatch epoch
-    bda_config_broadcast : pyspark.broadcast.Broadcast
-        Broadcast BDA configuration to avoid repeated loading
-    enable_event_time : bool, optional
-        Whether event-time watermarking is enabled for late data handling, by default True
-    watermark_duration : str, optional
-        Time window for late data tolerance, by default "20 seconds"
-        
-    Raises
-    ------
-    Exception
-        Logs processing errors and continues execution to maintain stream stability
-    """
-    
+def process_streaming_batch(df, epoch_id, bda_config):    
     start_time = time.time()
     
-    try:                
-        print(f"Microbatch {epoch_id} processing.")
+    try:       
         # Apply distributed BDA pipeline to processed visibility data
         try:
-            # apply_bda(df, bda_config)
+            result = apply_bda(df, bda_config)
             processing_time = (time.time() - start_time) * 1000
-            print(f"BDA processing completed in {processing_time:.0f} ms.")
-                      
+            print(f"BDA processing completed in {processing_time:.0f} ms.\n")
+            
+            # Acceder al primer elemento del DataFrame
+            first_row = result.first()  # Obtiene la primera fila
+            print(f"First row of microbatch {epoch_id}:\n{first_row}\n")
+            
         except Exception as e:
             print(f"BDA processing failed for epoch {epoch_id}: {e}")
 
@@ -368,27 +314,6 @@ def process_streaming_batch(df, epoch_id, bda_config):
 
 
 def normalize_baseline_key(antenna1: int, antenna2: int) -> str:
-    """
-    Generate normalized baseline identifier for consistent grouping operations.
-    
-    Creates standardized baseline key by ordering antenna IDs to ensure
-    bidirectional baselines produce identical keys for proper scientific
-    grouping in BDA processing.
-    
-    Parameters
-    ----------
-    antenna1 : int
-        First antenna identifier in baseline pair
-    antenna2 : int
-        Second antenna identifier in baseline pair
-    subms_id : str, optional
-        SubMS identifier for multi-dataset discrimination, by default None
-        
-    Returns
-    -------
-    str
-        Normalized baseline key in format "min_antenna-max_antenna"
-    """
     # Order antennas by ID to ensure consistent baseline representation
     ant_min, ant_max = sorted([antenna1, antenna2])
     
@@ -399,35 +324,6 @@ def run_consumer(kafka_servers: str = "localhost:9092",
                       topic: str = "visibility-stream",
                       config_path: str = None,
                       max_offsets_per_trigger: int = 200) -> None:
-    """
-    Initialize and run Spark streaming consumer for interferometry data processing.
-    
-    Sets up complete streaming pipeline from Kafka consumption through distributed
-    BDA processing. Configures Spark session, creates deserialization UDFs,
-    establishes streaming query with appropriate partitioning and watermarking,
-    and coordinates microbatch processing.
-    
-    Parameters
-    ----------
-    kafka_servers : str, optional
-        Comma-separated list of Kafka bootstrap servers, by default "localhost:9092"
-    topic : str, optional
-        Kafka topic name to consume from, by default "visibility-stream"
-    config_path : str, optional
-        Path to BDA configuration file, by default None
-    enable_event_time : bool, optional
-        Enable event-time processing with watermarks, by default True
-    watermark_duration : str, optional
-        Duration for late data tolerance, by default "20 seconds"
-    max_offsets_per_trigger : int, optional
-        Maximum Kafka offsets processed per trigger, by default 200
-        
-    Raises
-    ------
-    Exception
-        Kafka connection errors, Spark initialization failures, or streaming errors
-    """
-    
     print(f"Running Consumer Service: Kafka={kafka_servers}, Topic={topic}.")
     spark = create_spark_session(config_path)
     
@@ -455,15 +351,20 @@ def run_consumer(kafka_servers: str = "localhost:9092",
                 print(f"Microbatch {epoch_id} is empty.")
                 return
 
+            print("=" * 40)
+            print(f"Microbatch {epoch_id} processing.\n")
+
             # Usar mapPartitions para deserializar cada partición
             deserialized_rdd = df.rdd.mapPartitions(deserialize_chunk_to_rows)
             deserialized_df = spark.createDataFrame(deserialized_rdd, visibility_row_schema)
 
-            """ # Acceder al primer elemento del DataFrame
+            # Acceder al primer elemento del DataFrame
             first_row = deserialized_df.first()  # Obtiene la primera fila
-            print(f"First row of microbatch {epoch_id}: {first_row}") """
+            print(f"First row of microbatch {epoch_id}:\n{first_row}")
 
             process_streaming_batch(deserialized_df, epoch_id, bda_config)
+
+            print("=" * 40 + "\n")
 
         # Create unique checkpoint directory for streaming state management
         checkpoint_path = f"/tmp/spark-bda-{uuid.uuid4().hex[:8]}-{int(time.time())}"
@@ -489,31 +390,8 @@ def run_consumer(kafka_servers: str = "localhost:9092",
         print("Consumer stopped successfully")
 
 
-def main():
-    """
-    Command-line entry point for interferometry data consumer service.
-    
-    Parses command-line arguments and initializes Spark streaming consumer
-    with specified configuration parameters for Kafka connectivity,
-    BDA processing options, and stream management settings.
-    
-    Raises
-    ------
-    SystemExit
-        Fatal configuration or initialization errors
-    """
-    
-    parser = argparse.ArgumentParser(
-        description="BDA Interferometry Spark Consumer Service",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python consumer_service.py                              # Distributed BDA processing
-  python consumer_service.py --kafka-servers localhost:9092
-  python consumer_service.py --topic my-visibility-stream
-  python consumer_service.py --config /path/to/bda_config.json
-        """
-    )
+def main():    
+    parser = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter)
     
     parser.add_argument(
         "--kafka-servers",
@@ -530,18 +408,6 @@ Examples:
     parser.add_argument(
         "--config",
         help="Path to configuration file (optional)"
-    )
-    
-    parser.add_argument(
-        "--no-event-time",
-        action="store_true",
-        help="Disable event-time processing and watermarks (lab mode)"
-    )
-    
-    parser.add_argument(
-        "--watermark",
-        default="20 seconds",
-        help="Watermark duration for late data tolerance (default: 20 seconds)"
     )
     
     parser.add_argument(
