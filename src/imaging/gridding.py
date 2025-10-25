@@ -3,16 +3,8 @@ import traceback
 
 from pyspark.sql.functions import col
 
-grid_config = {
-    "u_size": 512,
-    "v_size": 512,
-    "u_min": -1000,
-    "u_max": 1000,
-    "v_min": -1000,
-    "v_max": 1000
-}
 
-def apply_gridding(df):
+def apply_gridding(df, grid_config):
     try:
         scientific_df = df.repartition(4, col("baseline_key"), col("scan_number"))
 
@@ -90,11 +82,9 @@ def uv_to_grid_index(u, v, grid_config):
     u_size = grid_config["u_size"]
     v_size = grid_config["v_size"]
     
-    # Normalizar a [0, 1]
     u_norm = (u - u_min) / (u_max - u_min)
     v_norm = (v - v_min) / (v_max - v_min)
     
-    # Convertir a índices (usar redondeo al más cercano)
     u_idx = int(np.round(u_norm * (u_size - 1)))
     v_idx = int(np.round(v_norm * (v_size - 1)))
     
