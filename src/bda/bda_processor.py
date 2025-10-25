@@ -1,29 +1,11 @@
-"""
-BDA Processor - Incremental Streaming Processing with Decorrelation Windows
-
-This module implements memory-efficient BDA processing using incremental windows
-based on physical decorrelation time following Wijnholds et al. 2018 methodology.
-Instead of accumulating full baselines, it processes data online as it arrives,
-maintaining constant RAM usage.
-
-The approach uses Spark's mapPartitions for distributed processing with window
-closure based on baseline-dependent decorrelation criteria using proper physics.
-
-Key Functions
--------------
-process_rows_incrementally : Main streaming BDA processor with online windows
-complete_window : Weighted averaging and window completion
-get_decorrelation_time : Physics-based window sizing per visibility sample
-"""
-
 import numpy as np
 from typing import Dict, Any
 import traceback
 
-from .bda_core import calculate_decorrelation_time, calculate_uv_rate, average_visibilities, average_fields
+from .bda_core import calculate_decorrelation_time, calculate_uv_rate, average_visibilities, average_uvw
 
 
-def create_window(row, start_time, decorr_time) -> Dict[str, Any]:
+def create_window(row, start_time, decorr_time):
     try:
         return {
             'start_time': start_time,
@@ -40,6 +22,8 @@ def create_window(row, start_time, decorr_time) -> Dict[str, Any]:
             'antenna2': row.antenna2,
             'scan_number': row.scan_number,
             'longitude': row.longitude,
+            'interval': [],
+            'exposure': [],
             'time': [],
             'u': [],
             'v': [],
@@ -55,20 +39,22 @@ def create_window(row, start_time, decorr_time) -> Dict[str, Any]:
         raise
 
 
-def add_window(window, time, u, v, w, visibilities, weight, flag):
+def add_window(window, interval, exposure, time, u, v, w, visibilities, weight, flag):
     try:
-        window["nrows"] += 1
-        window["time"].append(time)
-        window["u"].append(u)
-        window["v"].append(v)
-        window["w"].append(w)
+        window['nrows'] += 1
+        window['interval'].append(interval)
+        window['exposure'].append(exposure)
+        window['time'].append(time)
+        window['u'].append(u)
+        window['v'].append(v)
+        window['w'].append(w)
 
         vs = np.array(visibilities, dtype=np.float64)
         ws = np.array(weight, dtype=np.float64)
         fs = np.array(flag, dtype=np.bool_)
 
-        window["visibilities"].append(vs)
-        window["weight"].append(ws)
+        window['visibilities'].append(vs)
+        window['weight'].append(ws)
         window['flag'].append(fs)
 
         return window
@@ -79,14 +65,40 @@ def add_window(window, time, u, v, w, visibilities, weight, flag):
         raise
 
 
-def should_close_window(window, time) -> bool:
+def calculate_window_duration(times, intervals):
     try:
-        # Criterion: Maximum decorrelation time exceeded
-        time_since_start = time - window['start_time']
-        if time_since_start >= window['decorr_time']:
-            return True
+        if len(times) == 0:
+            return 0.0
+        
+        if len(times) == 1:
+            return intervals[0]
 
-        return False
+        MJD_TO_SECONDS = 86400.0
+
+        times_sec = np.array(times) * MJD_TO_SECONDS
+        intervals_sec = np.array(intervals)
+
+        t_start = times_sec[0] - intervals_sec[0] / 2.0
+        t_end = times_sec[-1] + intervals_sec[-1] / 2.0
+
+        return t_end - t_start
+
+    except Exception as e:
+        print(f"Error calculating window duration: {e}")
+        traceback.print_exc()
+        raise
+
+
+def should_close_window(window, current_time, current_interval):
+    try:
+        if window['nrows'] == 0:
+            return False
+
+        times = window['time'] + [current_time]
+        intervals = window['interval'] + [current_interval]
+
+        # Criterion: Maximum decorrelation time exceeded
+        return calculate_window_duration(times, intervals) > window['decorr_time']
     
     except Exception as e:
         print(f"Error checking if window should close: {e}")
@@ -96,12 +108,17 @@ def should_close_window(window, time) -> bool:
 
 def complete_window(window, baseline_key):
     try:
-        if window["nrows"] == 0:
+        if window['nrows'] == 0:
             return None
 
-        visibilities, weights, flags = window["visibilities"], window["weight"], window["flag"]
+        visibilities, weights, flags = window['visibilities'], window['weight'], window['flag']
         avg_vis, avg_weight, flag_avg = average_visibilities(visibilities, weights, flags)
-        u_avg, v_avg, w_avg, time_avg = average_fields(window["u"], window["v"], window["w"], window["time"], flags)
+        u_avg, v_avg, w_avg = average_uvw(window['u'], window['v'], window['w'], flags)
+
+
+        interval_avg = calculate_window_duration(window['time'], window['interval'])
+        exposures = np.array(window['exposure'])
+        exposure_avg = exposures.sum()
 
         # Return completed window with averaged values
         return {
@@ -109,7 +126,7 @@ def complete_window(window, baseline_key):
             'time_start': window['start_time'],
             'time_end': window['end_time'],
             'decorr_time': window['decorr_time'],
-
+            
             'subms_id': window['subms_id'],
             'field_id': window['field_id'],
             'spw_id': window['spw_id'],
@@ -120,7 +137,9 @@ def complete_window(window, baseline_key):
             'antenna2': window['antenna2'],
             'scan_number': window['scan_number'],
             'baseline_key': baseline_key,
-            'time': time_avg,
+            'interval': interval_avg,
+            'exposure': exposure_avg,
+            'time': window['start_time'],
             'u': u_avg,
             'v': v_avg,
             'w': w_avg,
@@ -134,17 +153,19 @@ def complete_window(window, baseline_key):
         traceback.print_exc()
         raise
 
-def process_rows(row_iterator, bda_config):
+
+def process_rows(iterator, bda_config):
     active_windows = {}  # baseline_key -> window
     
     try:
-
         decorr_factor = bda_config.get('decorr_factor', 0.95)
         field_offset_deg = bda_config.get('field_offset_deg', 2.0)
         
-        for row in row_iterator:
+        for row in iterator:
             baseline_key = row.baseline_key
             time = row.time
+            interval = row.interval
+            exposure = row.exposure
 
             u, v, w = row.u, row.v, row.w
             lambda_ref = row.lambda_ref 
@@ -163,30 +184,36 @@ def process_rows(row_iterator, bda_config):
 
             else:
                 window = active_windows[baseline_key]
-                window["decorr_time"] = min(window["decorr_time"], decorr_time)
 
-            # Check if existing window should be closed
-            if should_close_window(window, time):
-                # Complete and yield window
-                result = complete_window(window, baseline_key)
-                yield result
+                # Check if existing window should be closed
+                if should_close_window(window, time, interval):
+                    # Complete and yield window
+                    result = complete_window(window, baseline_key)
+                    yield result
 
-                # Remove completed window
-                del active_windows[baseline_key]
+                    # Remove completed window
+                    del active_windows[baseline_key]
+
+                    # Create new window for current row
+                    active_windows[baseline_key] = create_window(row, time, decorr_time)
+                
+                else:
+                    # Update decorrelation time
+                    window['decorr_time'] = min(window['decorr_time'], decorr_time)
                     
+            window = active_windows[baseline_key]
             visibilities, weight, flag = row.visibilities, row.weight, row.flag
             
             # Add sample to active window
-            window = active_windows[baseline_key]
-            add_window(window, time, u, v, w, visibilities, weight, flag)
+            add_window(window, interval, exposure, time, u, v, w, visibilities, weight, flag)
 
         # Flush remaining windows at end of partition
         for baseline_key, window in active_windows.items():
-            if window["nrows"] > 0:
+            if window['nrows'] > 0:
                 result = complete_window(window, baseline_key)
-                yield result
+                yield result 
     
     except Exception as e:
-        print(f"Error processing rows: {e}")
+        print(f"Error processing rows for bda: {e}")
         traceback.print_exc()
         raise

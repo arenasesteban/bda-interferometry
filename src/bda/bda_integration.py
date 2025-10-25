@@ -36,10 +36,10 @@ from .bda_processor import process_rows
 def apply_bda(df, bda_config):
     try:        
         # Partition by baseline for streaming
-        scientific_df = df.repartition(4, col("antenna1"), col("antenna2"), col("scan_number"))
+        scientific_df = df.repartition(4, col("baseline_key"), col("scan_number"))
         
         # Sort within partitions by time
-        sorted_df = scientific_df.sortWithinPartitions("time")
+        sorted_df = scientific_df.sortWithinPartitions("baseline_key", "time")
         
         # Define incremental BDA processing function
         def apply_bda_to_partition(iterator):
@@ -51,11 +51,11 @@ def apply_bda(df, bda_config):
 
             return iter(results)
         
-        bda_results_rdd = sorted_df.rdd.mapPartitions(apply_bda_to_partition)
-        bda_results_df = df.sparkSession.createDataFrame(bda_results_rdd, define_bda_schema())
+        bda_data = sorted_df.rdd.mapPartitions(apply_bda_to_partition)
+        bda_data_df = df.sparkSession.createDataFrame(bda_data, define_bda_schema())
 
-        return bda_results_df
-        
+        return bda_data_df
+
     except Exception as e:
         print(f"BDA processing failed: {e}")
         traceback.print_exc()
