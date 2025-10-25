@@ -61,7 +61,6 @@ def define_visibility_schema():
 
         StructField("exposure", DoubleType(), True),
         StructField("interval", DoubleType(), True),
-        StructField("integration_time_s", DoubleType(), True),
 
         StructField("time", DoubleType(), True),
         StructField("u", DoubleType(), True),
@@ -174,7 +173,6 @@ def process_chunk(chunk):
         lambda_ref = float(chunk.get('lambda_ref', 0.0))
         ra = float(chunk.get('ra', 0.0))
         dec = float(chunk.get('dec', 0.0))
-        integration_time_s = float(chunk.get('integration_time_s', 0.0))
 
         # Get the lists from the chunk
         antenna1 = chunk.get('antenna1', [])
@@ -224,7 +222,6 @@ def process_chunk(chunk):
                     'dec': dec,
                     'exposure': float(ex),
                     'interval': float(it),
-                    'integration_time_s': integration_time_s,
                     'time': float(tm),
                     'u': float(uu),
                     'v': float(vv),
@@ -273,7 +270,6 @@ def deserialize_chunk_to_rows(iterator):
                     row.get('dec'),
                     row.get('exposure'),
                     row.get('interval'),
-                    row.get('integration_time_s'),
                     row.get('time'),
                     row.get('u'),
                     row.get('v'),

@@ -205,7 +205,6 @@ def _extract_chunk_data(subms, vis_set, chunk_id: int, start_row: int, end_row: 
         # Timing information
         'exposure': to_simple_array(_safe_compute_slice(vis_set.dataset.EXPOSURE, start_row, end_row)),
         'interval': to_simple_array(_safe_compute_slice(vis_set.dataset.INTERVAL, start_row, end_row)),
-        'integration_time_s': _extract_integration_time(vis_set, start_row, end_row),
 
         'time': to_simple_array(_safe_compute_slice(vis_set.time, start_row, end_row)),
         'u': to_simple_array(_safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=0)),
@@ -262,58 +261,3 @@ def _safe_compute_slice(xr_array, start_row: int, end_row: int, coord_idx: int =
             
     except Exception:
         return None
-
-
-def _extract_integration_time(vis_set, start_row: int, end_row: int) -> float:
-    """
-    Extract integration time from VisibilitySet dataset using EXPOSURE/INTERVAL.
-    
-    Accesses EXPOSURE and INTERVAL columns directly from the dataset.
-    These fields are available in the VisibilitySet.dataset even though
-    not mapped as properties in the VisibilitySet class.
-    
-    Parameters
-    ----------
-    vis_set : object
-        VisibilitySet object with dataset containing EXPOSURE/INTERVAL
-    start_row : int
-        Starting row index
-    end_row : int
-        Ending row index
-        
-    Returns
-    -------
-    float
-        Integration time in seconds (median value from EXPOSURE column)
-    """
-    
-    try:
-        # Access EXPOSURE column directly from dataset - this IS available!
-        if hasattr(vis_set, 'dataset') and 'EXPOSURE' in vis_set.dataset.data_vars:
-            exposure = vis_set.dataset.EXPOSURE
-            exposure_slice = _safe_compute_slice(exposure, start_row, end_row)
-            if exposure_slice is not None and len(exposure_slice) > 0:
-                # Return median exposure time for this chunk
-                return float(np.median(exposure_slice))
-        
-        # Try INTERVAL column as alternative
-        if hasattr(vis_set, 'dataset') and 'INTERVAL' in vis_set.dataset.data_vars:
-            interval = vis_set.dataset.INTERVAL
-            interval_slice = _safe_compute_slice(interval, start_row, end_row)
-            if interval_slice is not None and len(interval_slice) > 0:
-                return float(np.median(interval_slice))
-        
-        # Calculate from time differences as fallback
-        time_data = _safe_compute_slice(vis_set.time, start_row, end_row)
-        if time_data is not None and len(time_data) > 1:
-            time_diffs = np.diff(time_data)
-            if len(time_diffs) > 0:
-                integration_time = float(np.median(time_diffs))
-                if integration_time > 0:
-                    return integration_time
-                
-    except (AttributeError, IndexError, KeyError, TypeError):
-        pass
-    
-    # Fallback to default integration time (3 minutes = 180 seconds)
-    return 180.0
