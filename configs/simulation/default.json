@@ -15,5 +15,6 @@
   "gaussian_minor_radius": 20.0,
   "gaussian_major_radius": 30.0,
   "gaussian_theta_angle": 60.0,
-  "longitude": -67.7556
+  "longitude": -67.755,
+  "latitude": -23.029
 }

@@ -1,14 +1,3 @@
-"""
-Consumer Service - Interferometry Data Streaming Microservice
-
-Processes interferometry visibility data from Kafka streams using Spark Structured Streaming.
-Handles MessagePack deserialization, data validation, baseline normalization, and coordinates
-distributed BDA processing through integration with the BDA pipeline.
-
-Functions provide complete streaming pipeline from Kafka consumption through scientific
-data preparation and distributed baseline-dependent averaging.
-"""
-
 import sys
 import argparse
 from pathlib import Path
@@ -19,10 +8,9 @@ import numpy as np
 import zlib
 import uuid
 
-from pyspark.sql.functions import udf, explode, col, from_unixtime, to_timestamp
 from pyspark.sql.types import (
     StringType, StructType, StructField, IntegerType,
-    DoubleType, ArrayType, BooleanType
+    DoubleType, ArrayType
 )
 
 # Add src directory to path
@@ -55,6 +43,7 @@ def define_visibility_schema():
         StructField("baseline_key", StringType(), True),
 
         StructField("longitude", DoubleType(), True),
+        StructField("latitude", DoubleType(), True),
         StructField("lambda_ref", DoubleType(), True),
         StructField("ra", DoubleType(), True),
         StructField("dec", DoubleType(), True),
@@ -71,8 +60,8 @@ def define_visibility_schema():
         StructField("visibilities", ArrayType(ArrayType(ArrayType(DoubleType()))), True),
         # weight: [corr] -> Array de Double
         StructField("weight", ArrayType(DoubleType()), True),
-        # flag: [chan][corr] con 0/1 -> Array de Array de Boolean
-        StructField("flag", ArrayType(ArrayType(BooleanType())), True)
+        # flag: [chan][corr] con 0/1 -> Array de Array de Integer
+        StructField("flag", ArrayType(ArrayType(IntegerType())), True)
     ])
 
 def deserialize_array(field_dict, field_name, expected_shapes):
@@ -170,6 +159,7 @@ def process_chunk(chunk):
         n_correlations = int(chunk.get('n_correlations', 0))
 
         longitude = float(chunk.get('longitude', 0.0))
+        latitude = float(chunk.get('latitude', 0.0))
         lambda_ref = float(chunk.get('lambda_ref', 0.0))
         ra = float(chunk.get('ra', 0.0))
         dec = float(chunk.get('dec', 0.0))
@@ -217,6 +207,7 @@ def process_chunk(chunk):
                     'scan_number': int(sc),
                     'baseline_key': normalize_baseline_key(a1, a2),
                     'longitude': longitude,
+                    'latitude': latitude,
                     'lambda_ref': lambda_ref,
                     'ra': ra,
                     'dec': dec,
@@ -265,6 +256,7 @@ def deserialize_chunk_to_rows(iterator):
                     row.get('scan_number'),
                     row.get('baseline_key'),
                     row.get('longitude'),
+                    row.get('latitude'),
                     row.get('lambda_ref'),
                     row.get('ra'),
                     row.get('dec'),
@@ -293,13 +285,16 @@ def process_streaming_batch(df, epoch_id, bda_config):
     try:       
         # Apply distributed BDA pipeline to processed visibility data
         try:
+            print("Rows in microbatch:", df.count())
             result = apply_bda(df, bda_config)
             processing_time = (time.time() - start_time) * 1000
-            print(f"BDA processing completed in {processing_time:.0f} ms.\n")
             
-            # Acceder al primer elemento del DataFrame
+            """ # Acceder al primer elemento del DataFrame
             first_row = result.first()  # Obtiene la primera fila
-            print(f"First row of microbatch {epoch_id}:\n{first_row}\n")
+            print(f"First row of microbatch {epoch_id}:\n{first_row}\n") """
+            
+            print("Rows after BDA processing:", result.count())
+            print(f"BDA processing completed in {processing_time:.0f} ms.\n")
             
         except Exception as e:
             print(f"BDA processing failed for epoch {epoch_id}: {e}")

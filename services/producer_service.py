@@ -268,7 +268,7 @@ def create_kafka_producer(kafka_servers=None):
 
 def stream_chunks_to_kafka(dataset, producer, topic: str, 
                           base_streaming_delay: float = 0.5,
-                          enable_warmup: bool = True, longitude: float = -67.7556) -> Dict[str, Any]:
+                          enable_warmup: bool = True, longitude: float = -67.755, latitude: float = -23.029) -> Dict[str, Any]:
     """
     Advanced streaming with sophisticated backpressure, telemetry, and warm-up.
     
@@ -315,9 +315,9 @@ def stream_chunks_to_kafka(dataset, producer, topic: str,
     # Backpressure thresholds (adjusted for current system performance)
     MAX_PENDING_FUTURES = 30        # Reduced for max_in_flight=3
     HIGH_LATENCY_THRESHOLD = 3000.0  # ms (more realistic for acks='all')
-    
+
     try:
-        for chunk in stream_subms_chunks(dataset, longitude):
+        for chunk in stream_subms_chunks(dataset, longitude, latitude):
             chunk_start_time = time.time()
             metrics.total_chunks += 1
             key = f"{chunk['subms_id']}_{chunk['chunk_id']}"
@@ -487,7 +487,7 @@ def run_producer_service(antenna_config_path: str,
 
         # Create producer and stream chunks with advanced telemetry
         producer = create_kafka_producer()
-        streaming_results = stream_chunks_to_kafka(dataset, producer, topic, sim_config["longitude"])
+        streaming_results = stream_chunks_to_kafka(dataset, producer, topic, sim_config["longitude"], sim_config["latitude"])
         
         return {
             'success': True,
