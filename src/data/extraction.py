@@ -15,7 +15,7 @@ import astropy.units as u
 from astropy.coordinates import SkyCoord
 
 
-def stream_subms_chunks(dataset, longitude) -> Generator[Dict[str, Any], None, None]:
+def stream_subms_chunks(dataset, longitude, latitude) -> Generator[Dict[str, Any], None, None]:
     """
     Stream chunks from SubMS objects in the dataset's ms_list.
     
@@ -54,11 +54,11 @@ def stream_subms_chunks(dataset, longitude) -> Generator[Dict[str, Any], None, N
     for subms in dataset.ms_list:
         if subms is None or subms.visibilities is None:
             continue
-            
-        yield from _extract_subms_chunks(subms, longitude, lambda_ref, ra, dec)
+
+        yield from _extract_subms_chunks(subms, longitude, latitude, lambda_ref, ra, dec)
 
 
-def _extract_subms_chunks(subms, longitude, lambda_ref, ra, dec) -> Generator[Dict[str, Any], None, None]:
+def _extract_subms_chunks(subms, longitude, latitude, lambda_ref, ra, dec) -> Generator[Dict[str, Any], None, None]:
     """
     Extract chunks from a single SubMS object.
     
@@ -95,6 +95,7 @@ def _extract_subms_chunks(subms, longitude, lambda_ref, ra, dec) -> Generator[Di
             subms, vis, chunk_id, start_row, end_row, 
             n_channels, n_correlations,
             longitude,
+            latitude,
             lambda_ref, ra, dec,
         )
         
@@ -145,7 +146,7 @@ def to_simple_array(np_array):
     
 
 def _extract_chunk_data(subms, vis_set, chunk_id: int, start_row: int, end_row: int,
-                       n_channels: int, n_correlations: int, longitude, lambda_ref, ra, dec) -> Dict[str, Any]:
+                       n_channels: int, n_correlations: int, longitude, latitude, lambda_ref, ra, dec) -> Dict[str, Any]:
     """
     Extract raw data for a specific chunk range.
     
@@ -198,6 +199,7 @@ def _extract_chunk_data(subms, vis_set, chunk_id: int, start_row: int, end_row: 
         'scan_number': to_simple_array(_safe_compute_slice(vis_set.scan_number, start_row, end_row)),
 
         'longitude': longitude,
+        'latitude': latitude,
         'lambda_ref': lambda_ref,
         'ra': ra,
         'dec': dec,
