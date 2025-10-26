@@ -1,26 +1,22 @@
 import numpy as np
-from typing import Tuple
 import traceback
+import astropy.units as units
 from astropy.time import Time
 from astropy.coordinates import EarthLocation
 
 
 def calculate_decorrelation_time(u_dot, v_dot, decorr_factor, field_offset_deg):
     try:
-        # Convertimos el ángulo del borde del FoV a radianes
         theta = np.radians(field_offset_deg)
 
-        # Definimos la dirección de la fuente en coordenadas de imagen
-        l = np.sin(theta)        # dirección horizontal (borde)
-        m = 0.0                  # dirección vertical
+        l = np.sin(theta)
+        m = 0.0
 
-        # Calculamos la tasa de fase efectiva para esta fila
         phi_dot = np.pi * (u_dot * l + v_dot * m)
 
-        # Aproximación de pequeña pérdida (Taylor de sinc) para resolver T
         T_eff = np.sqrt(6 * (1.0 - decorr_factor)) / abs(phi_dot)
 
-        return T_eff
+        return float(T_eff)
 
     except Exception as e:
         print(f"Error calculating decorrelation time: {e}")
@@ -28,21 +24,21 @@ def calculate_decorrelation_time(u_dot, v_dot, decorr_factor, field_offset_deg):
         raise
 
 
-def calculate_uv_rate(time, u, v, lambda_ref, declination_deg, longitude, ascension) -> Tuple[float, float]:
+def calculate_uv_rate(time, u, v, lambda_ref, dec, ra, longitude, latitude):
     try:
         angular_velocity_earth = 7.2921150e-5
 
         time_utc = Time(time, format='mjd', scale='utc')
-        location = EarthLocation(lon=longitude * u.deg)
+        location = EarthLocation(lon=longitude * units.deg, lat=latitude * units.deg)
         lst = time_utc.sidereal_time('apparent', longitude=location.lon)
 
-        lst_rad = lst * np.pi / 12
-        hour_angle = lst_rad - ascension
+        lst_rad = lst.to(units.rad).value
+        hour_angle = lst_rad - ra
 
         u_dot = ((u * np.cos(hour_angle)) - (v * np.sin(hour_angle))) * angular_velocity_earth / lambda_ref
-        v_dot = ((u * np.sin(declination_deg) * np.sin(hour_angle)) + (v * np.sin(declination_deg)) * np.cos(hour_angle)) * angular_velocity_earth / lambda_ref
+        v_dot = ((u * np.sin(dec) * np.sin(hour_angle)) + (v * np.sin(dec)) * np.cos(hour_angle)) * angular_velocity_earth / lambda_ref
 
-        return u_dot, v_dot
+        return float(u_dot), float(v_dot)
 
     except Exception as e:
         print(f"Error calculating uv rates: {e}")
@@ -72,10 +68,10 @@ def average_visibilities(visibilities, weights, flags):
             imag_avg = np.where(ws_sum > eps, vs_imag / ws_sum, 0)
 
         vs_avg = np.stack([real_avg, imag_avg], axis=-1)
-        ws_avg = ws_sum
-        fs_avg = (ws_sum < eps)
+        ws_avg = ws_sum.sum(axis=0)
+        fs_avg = (ws_sum < eps).astype(int)
 
-        return vs_avg, ws_avg, fs_avg
+        return vs_avg.tolist(), ws_avg.tolist(), fs_avg.tolist()
 
     except Exception as e:
         print(f"Error averaging visibilities: {e}")
@@ -89,17 +85,11 @@ def average_uvw(u, v, w, flags):
         vs = np.array(v, dtype=np.float64)
         ws = np.array(w, dtype=np.float64)
 
-        fs = np.array(flags)
-        masked_fs = ~fs
+        u_avg = np.mean(us)
+        v_avg = np.mean(vs)
+        w_avg = np.mean(ws)
 
-        rows = (masked_fs).any(axis=(1, 2))
-
-        if np.any(rows):
-            u_avg = np.mean(us[rows])
-            v_avg = np.mean(vs[rows])
-            w_avg = np.mean(ws[rows])
-
-        return u_avg, v_avg, w_avg
+        return float(u_avg), float(v_avg), float(w_avg)
 
     except Exception as e:
         print(f"Error averaging fields: {e}")
