@@ -1,5 +1,4 @@
 import numpy as np
-from typing import Dict, Any
 import traceback
 
 from .bda_core import calculate_decorrelation_time, calculate_uv_rate, average_visibilities, average_uvw
@@ -78,8 +77,8 @@ def calculate_window_duration(times, intervals):
         times_sec = np.array(times) * MJD_TO_SECONDS
         intervals_sec = np.array(intervals)
 
-        t_start = times_sec[0] - intervals_sec[0] / 2.0
-        t_end = times_sec[-1] + intervals_sec[-1] / 2.0
+        t_start = times_sec[0] - (intervals_sec[0] / 2.0)
+        t_end = times_sec[-1] + (intervals_sec[-1] / 2.0)
 
         return t_end - t_start
 
@@ -116,9 +115,9 @@ def complete_window(window, baseline_key):
         u_avg, v_avg, w_avg = average_uvw(window['u'], window['v'], window['w'], flags)
 
 
-        interval_avg = calculate_window_duration(window['time'], window['interval'])
+        interval_avg = float(calculate_window_duration(window['time'], window['interval']))
         exposures = np.array(window['exposure'])
-        exposure_avg = exposures.sum()
+        exposure_avg = float(exposures.sum())
 
         # Return completed window with averaged values
         return {
@@ -156,6 +155,7 @@ def complete_window(window, baseline_key):
 
 def process_rows(iterator, bda_config):
     active_windows = {}  # baseline_key -> window
+    baseline_stats = {}  # baseline_key -> stats dict
     
     try:
         decorr_factor = bda_config.get('decorr_factor', 0.95)
@@ -168,42 +168,40 @@ def process_rows(iterator, bda_config):
             exposure = row.exposure
 
             u, v, w = row.u, row.v, row.w
-            lambda_ref = row.lambda_ref 
-            longitude = row.longitude
-            dec, ra = row.dec, row.ra
-
+            
             # Calculates uv rates
-            u_dot, v_dot = calculate_uv_rate(time, u, v, lambda_ref, dec, longitude, ra)
-
+            u_dot, v_dot = calculate_uv_rate(time, u, v, row.lambda_ref, row.dec, row.ra, row.longitude, row.latitude)
+            
+            if baseline_key not in baseline_stats:
+                baseline_stats[baseline_key] = {'rows_in': 0, 'windows_out': 0, 'decorr_times': []}
+            baseline_stats[baseline_key]['rows_in'] += 1
+            
             # Calculate decorrelation time
             decorr_time = calculate_decorrelation_time(u_dot, v_dot, decorr_factor, field_offset_deg)
-
+            
+            baseline_stats[baseline_key]['decorr_times'].append(decorr_time)
+            
             # Create new window if needed
             if baseline_key not in active_windows:
                 active_windows[baseline_key] = create_window(row, time, decorr_time)
-
             else:
                 window = active_windows[baseline_key]
 
                 # Check if existing window should be closed
                 if should_close_window(window, time, interval):
-                    # Complete and yield window
                     result = complete_window(window, baseline_key)
+                    baseline_stats[baseline_key]['windows_out'] += 1
                     yield result
 
-                    # Remove completed window
+                    #Remove completed window
                     del active_windows[baseline_key]
 
                     # Create new window for current row
                     active_windows[baseline_key] = create_window(row, time, decorr_time)
-                
-                else:
-                    # Update decorrelation time
-                    window['decorr_time'] = min(window['decorr_time'], decorr_time)
-                    
+
             window = active_windows[baseline_key]
             visibilities, weight, flag = row.visibilities, row.weight, row.flag
-            
+
             # Add sample to active window
             add_window(window, interval, exposure, time, u, v, w, visibilities, weight, flag)
 
@@ -211,7 +209,15 @@ def process_rows(iterator, bda_config):
         for baseline_key, window in active_windows.items():
             if window['nrows'] > 0:
                 result = complete_window(window, baseline_key)
-                yield result 
+                baseline_stats[baseline_key]['windows_out'] += 1
+                yield result
+        
+        # Print baseline statistics
+        print("\n=== BDA Baseline Statistics ===")
+        for bl_key, stats in sorted(baseline_stats.items()):
+            avg_decorr = np.mean(stats['decorr_times'])
+            print(f"{bl_key}: {stats['rows_in']} rows → {stats['windows_out']} windows "
+                  f"(decorr_avg={avg_decorr:.1f}s, compression={100*(1-stats['windows_out']/stats['rows_in']):.1f}%)")
     
     except Exception as e:
         print(f"Error processing rows for bda: {e}")
