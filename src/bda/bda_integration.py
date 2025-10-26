@@ -1,27 +1,3 @@
-"""
-BDA Integration - Incremental Streaming BDA Pipeline Orchestration
-
-This module orchestrates the incremental BDA (Baseline-Dependent Averaging)        results_data = [{
-            'result_type': 'incremental_streaming_bda',
-            'processing_status': 'bda_completed_streaming',
-            'total_bda_windows': total_windows,
-            'total_input_rows': total_input_rows,
-            'unique_groups_processed': min(unique_groups, 10),  # Estimation without collect()
-            'sample_baseline_keys': min(unique_groups, 10),  # Estimation without collect()
-            'sample_avg_compression': avg_compression_ratio,  # Use already calculated value
-            'processing_mode': 'incremental_streaming_windows'
-        }]using Apache Spark's mapPartitions. It processes visibility data in decorrelation-time
-windows for memory-efficient streaming with constant RAM usage.
-
-The module uses online window closure based on physical decorrelation criteria,
-eliminating the need to accumulate full baselines in memory.
-
-Key Functions
--------------
-apply_distributed_bda_pipeline : Main orchestration function for incremental streaming BDA
-convert_bda_result_to_spark_tuple : Converts streaming window results to Spark format
-"""
-
 import traceback
 
 from pyspark.sql.functions import col
@@ -69,12 +45,18 @@ def convert_window_to_tuple(window):
             window["field_id"],
             window["spw_id"],
             window["polarization_id"],
+            window["nrows"],
             window["n_channels"],
             window["n_correlations"],
+            window["time_start"],
+            window["time_end"],
+            window["decorr_time"],
             window["antenna1"],
             window["antenna2"],
             window["scan_number"],
             window["baseline_key"],
+            window["exposure"],
+            window["interval"],
             window['time'],
             window['u'],
             window['v'],
@@ -97,20 +79,27 @@ def define_bda_schema():
         StructField("spw_id", IntegerType(), True),
         StructField("polarization_id", IntegerType(), True),
 
+        StructField("nrows", IntegerType(), True),
         StructField("n_channels", IntegerType(), True),
         StructField("n_correlations", IntegerType(), True),
+        StructField("time_start", DoubleType(), True),
+        StructField("time_end", DoubleType(), True),
+        StructField("decorr_time", DoubleType(), True),
 
         StructField("antenna1", IntegerType(), True),
         StructField("antenna2", IntegerType(), True),
         StructField("scan_number", IntegerType(), True),
         StructField("baseline_key", StringType(), True),
 
+        StructField("exposure", DoubleType(), True),
+        StructField("interval", DoubleType(), True),
+
         StructField('time', DoubleType(), True),
         StructField('u', DoubleType(), True),
         StructField('v', DoubleType(), True),
         StructField('w', DoubleType(), True),
 
-        StructField('visibilities', ArrayType(ArrayType(DoubleType())), True),
+        StructField('visibilities', ArrayType(ArrayType(ArrayType(DoubleType()))), True),
         StructField('weight', ArrayType(DoubleType()), True),
-        StructField('flag', ArrayType(IntegerType()), True)
+        StructField('flag', ArrayType(ArrayType(IntegerType())), True)
     ])
