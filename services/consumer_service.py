@@ -12,6 +12,8 @@ from pyspark.sql.types import (
     StringType, StructType, StructField, IntegerType,
     DoubleType, ArrayType
 )
+from pyspark.sql import DataFrame
+from functools import reduce
 
 # Add src directory to path
 project_root = Path(__file__).parent.parent
@@ -21,6 +23,8 @@ sys.path.append(str(src_path))
 from processing.spark_session import create_spark_session
 from bda.bda_config import load_bda_config
 from bda.bda_integration import apply_bda
+from imaging.gridding import apply_gridding, load_grid_config, consolide_gridding
+from imaging.dirty_image import generate_dirty_image
 
 
 def define_visibility_schema():
@@ -279,25 +283,25 @@ def deserialize_chunk_to_rows(iterator):
     
     return iter(all_rows)
 
-def process_streaming_batch(df, epoch_id, bda_config):    
+def process_streaming_batch(df, epoch_id, bda_config, grid_config):    
     start_time = time.time()
     
     try:       
+        print("Rows in microbatch:", df.count())
+
         # Apply distributed BDA pipeline to processed visibility data
-        try:
-            print("Rows in microbatch:", df.count())
-            result = apply_bda(df, bda_config)
-            processing_time = (time.time() - start_time) * 1000
-            
-            """ # Acceder al primer elemento del DataFrame
-            first_row = result.first()  # Obtiene la primera fila
-            print(f"First row of microbatch {epoch_id}:\n{first_row}\n") """
-            
-            print("Rows after BDA processing:", result.count())
-            print(f"BDA processing completed in {processing_time:.0f} ms.\n")
-            
-        except Exception as e:
-            print(f"BDA processing failed for epoch {epoch_id}: {e}")
+        bda_result = apply_bda(df, bda_config)
+
+        processing_time = (time.time() - start_time) * 1000
+        print(f"BDA processing completed in {processing_time:.0f} ms.\n")
+        
+        # Apply distributed gridding to BDA-processed data
+        grid_result = apply_gridding(bda_result, grid_config)
+
+        processing_time = (time.time() - start_time) * 1000
+        print(f"Gridding processing completed in {processing_time:.0f} ms.\n")
+
+        return grid_result
 
     except Exception as e:
         print(f"Error in microbatch {epoch_id}: {e}")
@@ -334,8 +338,10 @@ def run_consumer(kafka_servers: str = "localhost:9092",
         
         visibility_row_schema = define_visibility_schema()
 
-        config_path = str(project_root / "configs" / "bda_config.json")
-        bda_config = load_bda_config(config_path)
+        bda_config = load_bda_config(str(project_root / "configs" / "bda_config.json"))
+        grid_config = load_grid_config(str(project_root / "configs" / "grid_config.json"))
+
+        gridded_visibilities = []
 
         def process_batch(df, epoch_id):
             if df.isEmpty():
@@ -349,11 +355,10 @@ def run_consumer(kafka_servers: str = "localhost:9092",
             deserialized_rdd = df.rdd.mapPartitions(deserialize_chunk_to_rows)
             deserialized_df = spark.createDataFrame(deserialized_rdd, visibility_row_schema)
 
-            # Acceder al primer elemento del DataFrame
-            first_row = deserialized_df.first()  # Obtiene la primera fila
-            print(f"First row of microbatch {epoch_id}:\n{first_row}")
-
-            process_streaming_batch(deserialized_df, epoch_id, bda_config)
+            grid_result = process_streaming_batch(deserialized_df, epoch_id, bda_config, grid_config)
+            
+            if grid_result is not None:
+                gridded_visibilities.append(grid_result)
 
             print("=" * 40 + "\n")
 
@@ -362,13 +367,21 @@ def run_consumer(kafka_servers: str = "localhost:9092",
 
         query = kafka_processed.writeStream \
             .foreachBatch(process_batch) \
-            .trigger(processingTime='5 seconds') \
+            .trigger(processingTime='10 seconds') \
             .option("checkpointLocation", checkpoint_path) \
             .start()
-        
+
         print("Consumer ready.")
-        query.awaitTermination()
-        
+        query.awaitTermination(timeout=100)
+
+        print("Combining gridded visibilities...")
+        gridded_visibilities_df = reduce(DataFrame.unionByName, gridded_visibilities)
+        final_gridded = consolide_gridding(gridded_visibilities_df)
+
+        print("Generating dirty image...")
+        generate_dirty_image(final_gridded, grid_config)
+        print("Dirty image generated.")
+
     except KeyboardInterrupt:
         print("\nStopping consumer.")
         
