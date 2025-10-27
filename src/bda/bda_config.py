@@ -8,11 +8,10 @@ for robust configuration management in streaming interferometry processing.
 
 import json
 from pathlib import Path
-from typing import Dict
 import traceback
 
 
-def load_bda_config(config_path: str) -> Dict[str, float]:
+def load_bda_config(config_path):
     config_file = Path(config_path)
     
     if not config_file.exists():
@@ -36,7 +35,7 @@ def load_bda_config(config_path: str) -> Dict[str, float]:
         raise
 
 
-def validate_bda_config(config: Dict[str, float]) -> Dict[str, float]:
+def validate_bda_config(config):
     try:
         validated = config.copy()
         

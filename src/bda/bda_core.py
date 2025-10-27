@@ -66,9 +66,11 @@ def average_visibilities(visibilities, weights, flags):
         with np.errstate(divide='ignore', invalid='ignore'):
             real_avg = np.where(ws_sum > eps, vs_real / ws_sum, 0)
             imag_avg = np.where(ws_sum > eps, vs_imag / ws_sum, 0)
+        
+        fs_valid = ~(fs.astype(bool)).any(axis=1)
 
         vs_avg = np.stack([real_avg, imag_avg], axis=-1)
-        ws_avg = ws_sum.sum(axis=0)
+        ws_avg = (ws * fs_valid).sum(axis=0)
         fs_avg = (ws_sum < eps).astype(int)
 
         return vs_avg.tolist(), ws_avg.tolist(), fs_avg.tolist()
@@ -79,7 +81,7 @@ def average_visibilities(visibilities, weights, flags):
         raise
 
 
-def average_uvw(u, v, w, flags):
+def average_uvw(u, v, w):
     try:
         us = np.array(u, dtype=np.float64)
         vs = np.array(v, dtype=np.float64)

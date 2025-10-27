@@ -112,7 +112,7 @@ def complete_window(window, baseline_key):
 
         visibilities, weights, flags = window['visibilities'], window['weight'], window['flag']
         avg_vis, avg_weight, flag_avg = average_visibilities(visibilities, weights, flags)
-        u_avg, v_avg, w_avg = average_uvw(window['u'], window['v'], window['w'], flags)
+        u_avg, v_avg, w_avg = average_uvw(window['u'], window['v'], window['w'])
 
 
         interval_avg = float(calculate_window_duration(window['time'], window['interval']))
@@ -213,12 +213,13 @@ def process_rows(iterator, bda_config):
                 yield result
         
         # Print baseline statistics
-        print("\n=== BDA Baseline Statistics ===")
+        print("=== BDA Baseline Statistics ===")
         for bl_key, stats in sorted(baseline_stats.items()):
             avg_decorr = np.mean(stats['decorr_times'])
             print(f"{bl_key}: {stats['rows_in']} rows → {stats['windows_out']} windows "
                   f"(decorr_avg={avg_decorr:.1f}s, compression={100*(1-stats['windows_out']/stats['rows_in']):.1f}%)")
-    
+        print("===========================\n")
+
     except Exception as e:
         print(f"Error processing rows for bda: {e}")
         traceback.print_exc()
