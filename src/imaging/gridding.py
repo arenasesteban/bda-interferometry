@@ -1,35 +1,40 @@
 import numpy as np
 import traceback
+import json
+from pathlib import Path
 
-from pyspark.sql.functions import col
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StructType, StructField, DoubleType, IntegerType
+)
 
 
 def apply_gridding(df, grid_config):
     try:
-        scientific_df = df.repartition(4, col("baseline_key"), col("scan_number"))
+        scientific_df = df.repartition(4, F.col("baseline_key"), F.col("scan_number"))
 
         def grid_data(iterator):
-            partition_grids = []
+            return process_gridding(iterator, grid_config)
 
-            for gridded in process_rows(iterator, grid_config):
-                partition_grids.append(gridded)
+        gridded = scientific_df.rdd.mapPartitions(grid_data)
+        gridded_rdd = df.sparkSession.createDataFrame(gridded, define_grid_schema())
 
-            if partition_grids:
-                combined_grid = combine_grids(partition_grids, grid_config)
-                return iter([combined_grid])
-
-            return iter([])
-            
-        gridded_rdd = scientific_df.rdd.mapPartitions(grid_data)
-        return gridded_rdd
+        gridded_acc = gridded_rdd.groupBy("n_channels", "n_correlations", "u_idx", "v_idx").agg(
+            F.sum("vs_real").alias("vs_real"),
+            F.sum("vs_imag").alias("vs_imag"),
+            F.sum("weights").alias("weights")
+        )
+        
+        return gridded_acc
 
     except Exception as e:
         print(f"Error during gridding: {e}")
         traceback.print_exc()
         raise
 
-def process_rows(iterator, grid_config):
-    accumulated_grid = None
+
+def process_gridding(iterator, grid_config):
+    accumulated_grid = {}
 
     try:
         for row in iterator:
@@ -46,26 +51,41 @@ def process_rows(iterator, grid_config):
             n_channels = row.n_channels
             n_correlations = row.n_correlations
 
-            if accumulated_grid is None:
-                accumulated_grid = create_grid(n_channels, n_correlations, grid_config)
-
             for chan in range(n_channels):
                 for corr in range(n_correlations):
-                    if flags[chan, corr]:
+                    if flags[chan][corr]:
                         continue
 
-                    vs_real = visibilities[chan, corr, 0]
-                    vs_imag = visibilities[chan, corr, 1]
+                    vs_real = visibilities[chan][corr][0]
+                    vs_imag = visibilities[chan][corr][1]
                     vs_complex = complex(vs_real, vs_imag)
 
                     ws_val = weights[corr]
 
-                    accumulated_grid['vs_real'][chan, corr, u_idx, v_idx] += vs_complex.real * ws_val
-                    accumulated_grid['vs_imag'][chan, corr, u_idx, v_idx] += vs_complex.imag * ws_val
-                    accumulated_grid['weights'][chan, corr, u_idx, v_idx] += ws_val
+                    grid_key = (chan, corr, u_idx, v_idx)
 
-        if accumulated_grid is not None:
-            yield accumulated_grid
+                    if grid_key not in accumulated_grid:
+                        accumulated_grid[grid_key] = {
+                            'vs_real': vs_complex.real * ws_val,
+                            'vs_imag': vs_complex.imag * ws_val,
+                            'weights': ws_val
+                        }
+                    else:
+                        accumulated_grid[grid_key]['vs_real'] += vs_complex.real * ws_val
+                        accumulated_grid[grid_key]['vs_imag'] += vs_complex.imag * ws_val
+                        accumulated_grid[grid_key]['weights'] += ws_val
+            
+        if accumulated_grid:
+            for (chan, corr, u_idx, v_idx), values in accumulated_grid.items():
+                yield (
+                    int(chan),
+                    int(corr),
+                    int(u_idx),
+                    int(v_idx),
+                    values['vs_real'],
+                    values['vs_imag'],
+                    values['weights']
+                )
 
     except Exception as e:
         print(f"Error processing rows for gridding: {e}")
@@ -91,84 +111,58 @@ def uv_to_grid_index(u, v, grid_config):
     return u_idx, v_idx
 
 
-def create_grid(n_channels, n_correlations, grid_config):
+def load_grid_config(config_path):
+    config_file = Path(config_path)
+
+    if not config_file.exists():
+        raise FileNotFoundError(f"Grid config file not found: {config_path}")
+
     try:
-        u_size = grid_config["u_size"]
-        v_size = grid_config["v_size"]
+        with open(config_file, 'r') as f:
+            config = json.load(f)
 
-        u_grid, v_grid = create_uv_grid(grid_config)
+        # Validate required fields
+        required_fields = ['u_min', 'u_max', 'v_min', 'v_max', 'u_size', 'v_size']
+        for field in required_fields:
+            if field not in config:
+                raise ValueError(f"Missing required field '{field}' in grid config")
 
-        return {
-            'vs_real': np.zeros((n_channels, n_correlations, u_size, v_size), dtype=np.float32),
-            'vs_imag': np.zeros((n_channels, n_correlations, u_size, v_size), dtype=np.float32),
-            'weights': np.zeros((n_channels, n_correlations, u_size, v_size), dtype=np.float32),
-            'u_grid': u_grid,
-            'v_grid': v_grid
-        }
+        return config
 
     except Exception as e:
-        print(f"Error creating grid: {e}")
+        print(f"Error loading grid config: {e}")
         traceback.print_exc()
         raise
 
-def create_uv_grid(grid_config):
+
+def define_grid_schema():
+    return StructType([
+        StructField("n_channels", IntegerType(), True),
+        StructField("n_correlations", IntegerType(), True),
+        StructField("u_idx", IntegerType(), True),
+        StructField("v_idx", IntegerType(), True),
+        StructField("vs_real", DoubleType(), True),
+        StructField("vs_imag", DoubleType(), True),
+        StructField("weights", DoubleType(), True)
+    ])
+
+
+def consolide_gridding(gridded_rdd):
     try:
-        u_min = grid_config["u_min"]
-        u_max = grid_config["u_max"]
-        v_min = grid_config["v_min"]
-        v_max = grid_config["v_max"]
+        grid_acc = gridded_rdd.groupBy("n_channels", "n_correlations", "u_idx", "v_idx").agg(
+            F.sum("vs_real").alias("vs_real"),
+            F.sum("vs_imag").alias("vs_imag"),
+            F.sum("weights").alias("weights")
+        )
 
-        u_size = grid_config["u_size"]
-        v_size = grid_config["v_size"]
+        grid_avg = (grid_acc
+           .withColumn("vs_real", F.when(F.col("weights") > 0, F.col("vs_real")/F.col("weights")).otherwise(F.lit(0.0)))
+           .withColumn("vs_imag", F.when(F.col("weights") > 0, F.col("vs_imag")/F.col("weights")).otherwise(F.lit(0.0)))
+           .select("n_channels","n_correlations","u_idx","v_idx","vs_real","vs_imag","weights"))
 
-        u_coords = np.linspace(u_min, u_max, num=u_size, dtype=np.float32)
-        v_coords = np.linspace(v_min, v_max, num=v_size, dtype=np.float32)
-
-        u_grid, v_grid = np.meshgrid(u_coords, v_coords, indexing='ij')
-
-        return u_grid, v_grid
+        return grid_avg
 
     except Exception as e:
-        print(f"Error creating UV grid: {e}")
+        print(f"Error consolidating gridding: {e}")
         traceback.print_exc()
         raise
-
-def combine_grids(grid_list, grid_config):
-    try:
-        first = grid_list[0]
-        n_channels, n_correlations = first['vs_real'].shape[0], first['vs_real'].shape[1]
-
-        grid_result = create_grid(n_channels, n_correlations, grid_config)
-
-        for grid in grid_list:
-            grid_result['vs_real'] += grid['vs_real']
-            grid_result['vs_imag'] += grid['vs_imag']
-            grid_result['weights'] += grid['weights']
-        
-        return grid_result
-    
-    except Exception as e:
-        print(f"Error combining grids: {e}")
-        traceback.print_exc()
-        raise
-
-def process_all_batches(gridded_batches, grid_config):
-    try:
-        all_grids = gridded_batches.collect()
-        final_grid = combine_grids(all_grids, grid_config)
-        
-        return normalize_grid(final_grid)
-
-
-    except Exception as e:
-        print(f"Error processing all batches: {e}")
-        traceback.print_exc()
-        raise
-
-def normalize_grid(grid):
-    mask = grid['weights'] > 0
-
-    grid['vs_real'] = np.where(mask, grid['vs_real'] / grid['weights'], 0)
-    grid['vs_imag'] = np.where(mask, grid['vs_imag'] / grid['weights'], 0)
-
-    return grid
