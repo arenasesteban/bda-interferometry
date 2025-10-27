@@ -397,7 +397,7 @@ def stream_chunks_to_kafka(dataset, producer, topic: str,
                 metrics.failed_chunks += 1
                 metrics.logger.info(f"✗ Error processing chunk {key}: {e}")
                 continue
-                
+
     except Exception as e:
         metrics.logger.info(f"❌ Critical streaming error: {e}")
         raise

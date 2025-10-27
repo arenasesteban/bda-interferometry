@@ -3,7 +3,7 @@
   "freq_end": 50.0,
   "n_frequencies": 50,
   "date_string": "2002-05-10",
-  "observation_time": "1h",
+  "observation_time": "00:10:00",
   "declination": "-45d00m00s",
   "integration_time": 180.0,
   "n_point_sources": 15,
