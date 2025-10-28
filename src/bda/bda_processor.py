@@ -163,15 +163,19 @@ def process_rows(iterator, bda_config):
         
         for row in iterator:
             baseline_key = row.baseline_key
+
             time = row.time
             interval = row.interval
             exposure = row.exposure
 
-            u, v, w = row.u, row.v, row.w
+            u, v = row.u, row.v
+            Lx, Ly = row.Lx, row.Ly
+            
+            lambda_ = row.lambda_
             
             # Calculates uv rates
-            u_dot, v_dot = calculate_uv_rate(time, u, v, row.lambda_ref, row.dec, row.ra, row.longitude, row.latitude)
-            
+            u_dot, v_dot = calculate_uv_rate(time, Lx, Ly, lambda_, row.dec, row.ra, row.longitude, row.latitude)
+
             if baseline_key not in baseline_stats:
                 baseline_stats[baseline_key] = {'rows_in': 0, 'windows_out': 0, 'decorr_times': []}
             baseline_stats[baseline_key]['rows_in'] += 1
@@ -203,7 +207,7 @@ def process_rows(iterator, bda_config):
             visibilities, weight, flag = row.visibilities, row.weight, row.flag
 
             # Add sample to active window
-            add_window(window, interval, exposure, time, u, v, w, visibilities, weight, flag)
+            add_window(window, interval, exposure, time, u, v, visibilities, weight, flag)
 
         # Flush remaining windows at end of partition
         for baseline_key, window in active_windows.items():

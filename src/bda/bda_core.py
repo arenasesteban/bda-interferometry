@@ -24,7 +24,7 @@ def calculate_decorrelation_time(u_dot, v_dot, decorr_factor, field_offset_deg):
         raise
 
 
-def calculate_uv_rate(time, u, v, lambda_ref, dec, ra, longitude, latitude):
+def calculate_uv_rate(time, Lx, Ly, dec, ra, lambda_, longitude, latitude):
     try:
         angular_velocity_earth = 7.2921150e-5
 
@@ -35,8 +35,8 @@ def calculate_uv_rate(time, u, v, lambda_ref, dec, ra, longitude, latitude):
         lst_rad = lst.to(units.rad).value
         hour_angle = lst_rad - ra
 
-        u_dot = ((u * np.cos(hour_angle)) - (v * np.sin(hour_angle))) * angular_velocity_earth / lambda_ref
-        v_dot = ((u * np.sin(dec) * np.sin(hour_angle)) + (v * np.sin(dec)) * np.cos(hour_angle)) * angular_velocity_earth / lambda_ref
+        u_dot = ((Lx * np.cos(hour_angle)) - (Ly * np.sin(hour_angle))) * angular_velocity_earth / lambda_
+        v_dot = ((Lx * np.sin(dec) * np.sin(hour_angle)) + (Ly * np.sin(dec)) * np.cos(hour_angle)) * angular_velocity_earth / lambda_
 
         return float(u_dot), float(v_dot)
 

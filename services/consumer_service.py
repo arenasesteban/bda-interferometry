@@ -23,7 +23,7 @@ sys.path.append(str(src_path))
 from processing.spark_session import create_spark_session
 from bda.bda_config import load_bda_config
 from bda.bda_integration import apply_bda
-from imaging.gridding import apply_gridding, load_grid_config, consolide_gridding
+from imaging.gridding import apply_gridding, load_grid_config, consolidate_gridding
 from imaging.dirty_image import generate_dirty_image
 
 
@@ -48,17 +48,20 @@ def define_visibility_schema():
 
         StructField("longitude", DoubleType(), True),
         StructField("latitude", DoubleType(), True),
-        StructField("lambda_ref", DoubleType(), True),
+
+        StructField("lambda_", DoubleType(), True),
         StructField("ra", DoubleType(), True),
         StructField("dec", DoubleType(), True),
 
         StructField("exposure", DoubleType(), True),
         StructField("interval", DoubleType(), True),
-
         StructField("time", DoubleType(), True),
+
         StructField("u", DoubleType(), True),
         StructField("v", DoubleType(), True),
         StructField("w", DoubleType(), True),
+        StructField("Lx", DoubleType(), True),
+        StructField("Ly", DoubleType(), True),
 
         # visibilities: [chan][corr] con [real, imag] -> Array de Array de Array de Double
         StructField("visibilities", ArrayType(ArrayType(ArrayType(DoubleType()))), True),
@@ -164,7 +167,8 @@ def process_chunk(chunk):
 
         longitude = float(chunk.get('longitude', 0.0))
         latitude = float(chunk.get('latitude', 0.0))
-        lambda_ref = float(chunk.get('lambda_ref', 0.0))
+
+        lambda_ = float(chunk.get('lambda_', 0.0))
         ra = float(chunk.get('ra', 0.0))
         dec = float(chunk.get('dec', 0.0))
 
@@ -178,6 +182,8 @@ def process_chunk(chunk):
         u = chunk.get('u', [])
         v = chunk.get('v', [])
         w = chunk.get('w', [])
+        Lx = chunk.get('Lx', [])
+        Ly = chunk.get('Ly', [])
 
         expected_shapes = {
             'visibilities': (nrows, n_channels, n_correlations),
@@ -191,7 +197,7 @@ def process_chunk(chunk):
 
         rows = []
 
-        for i, (a1, a2, sc, ex, it, tm, uu, vv, ww) in enumerate(zip(antenna1, antenna2, scan_number, exposure, interval, time, u, v, w)):
+        for i, (a1, a2, sc, ex, it, tm, uu, vv, ww, xx, yy) in enumerate(zip(antenna1, antenna2, scan_number, exposure, interval, time, u, v, w, Lx, Ly)):
             vs, wg, fg = extract_data(visibilities, flag, weight, i)
 
             rows.append(
@@ -212,7 +218,7 @@ def process_chunk(chunk):
                     'baseline_key': normalize_baseline_key(a1, a2),
                     'longitude': longitude,
                     'latitude': latitude,
-                    'lambda_ref': lambda_ref,
+                    'lambda_': lambda_,
                     'ra': ra,
                     'dec': dec,
                     'exposure': float(ex),
@@ -221,6 +227,8 @@ def process_chunk(chunk):
                     'u': float(uu),
                     'v': float(vv),
                     'w': float(ww),
+                    'Lx': float(xx),
+                    'Ly': float(yy),
                     'visibilities': vs,
                     'weight': wg,
                     'flag': fg
@@ -261,7 +269,7 @@ def deserialize_chunk_to_rows(iterator):
                     row.get('baseline_key'),
                     row.get('longitude'),
                     row.get('latitude'),
-                    row.get('lambda_ref'),
+                    row.get('lambda_'),
                     row.get('ra'),
                     row.get('dec'),
                     row.get('exposure'),
@@ -270,6 +278,8 @@ def deserialize_chunk_to_rows(iterator):
                     row.get('u'),
                     row.get('v'),
                     row.get('w'),
+                    row.get('Lx'),
+                    row.get('Ly'),
                     row.get('visibilities', []),
                     row.get('weight', []),
                     row.get('flag', [])
