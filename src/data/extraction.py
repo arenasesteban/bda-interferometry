@@ -13,7 +13,7 @@ import numpy as np
 from typing import Dict, Any, Generator
 import astropy.units as u
 from astropy.coordinates import SkyCoord
-
+from astropy.constants import c
 
 def stream_subms_chunks(dataset, longitude, latitude) -> Generator[Dict[str, Any], None, None]:
     """
@@ -41,8 +41,9 @@ def stream_subms_chunks(dataset, longitude, latitude) -> Generator[Dict[str, Any
     if not hasattr(dataset, 'ms_list') or dataset.ms_list is None:
         raise ValueError("No ms_list found in dataset")
     
-    lambda_ref = dataset.spws.lambda_ref.value
+    antennas = dataset.antenna.dataset.POSITION
     
+    ref_nu = dataset.spws.ref_nu
     ra_deg = dataset.field.ref_dirs.ra[0]
     dec_deg = dataset.field.ref_dirs.dec[0]
 
@@ -55,10 +56,10 @@ def stream_subms_chunks(dataset, longitude, latitude) -> Generator[Dict[str, Any
         if subms is None or subms.visibilities is None:
             continue
 
-        yield from _extract_subms_chunks(subms, longitude, latitude, lambda_ref, ra, dec)
+        yield from _extract_subms_chunks(subms, antennas, longitude, latitude, ref_nu, ra, dec)
 
 
-def _extract_subms_chunks(subms, longitude, latitude, lambda_ref, ra, dec) -> Generator[Dict[str, Any], None, None]:
+def _extract_subms_chunks(subms, antennas, longitude, latitude, ref_nu, ra, dec) -> Generator[Dict[str, Any], None, None]:
     """
     Extract chunks from a single SubMS object.
     
@@ -92,11 +93,11 @@ def _extract_subms_chunks(subms, longitude, latitude, lambda_ref, ra, dec) -> Ge
         end_row = min(start_row + chunk_size, nrows)
         
         chunk = _extract_chunk_data(
-            subms, vis, chunk_id, start_row, end_row, 
+            subms, antennas, vis, chunk_id, start_row, end_row, 
             n_channels, n_correlations,
             longitude,
             latitude,
-            lambda_ref, ra, dec,
+            ref_nu, ra, dec,
         )
         
         yield chunk
@@ -145,8 +146,8 @@ def to_simple_array(np_array):
         return []
     
 
-def _extract_chunk_data(subms, vis_set, chunk_id: int, start_row: int, end_row: int,
-                       n_channels: int, n_correlations: int, longitude, latitude, lambda_ref, ra, dec) -> Dict[str, Any]:
+def _extract_chunk_data(subms, antennas, vis_set, chunk_id: int, start_row: int, end_row: int,
+                       n_channels: int, n_correlations: int, longitude, latitude, ref_nu, ra, dec) -> Dict[str, Any]:
     """
     Extract raw data for a specific chunk range.
     
@@ -178,7 +179,16 @@ def _extract_chunk_data(subms, vis_set, chunk_id: int, start_row: int, end_row: 
     """
     
     chunk_size = end_row - start_row
-    
+
+    uvw_lambda = vis_set.uvw.get_uvw_lambda(ref_nu, as_xarray=True)
+    lambda_ = c.value / ref_nu
+
+    antenna1 = _safe_compute_slice(vis_set.antenna1, start_row, end_row)
+    antenna2 = _safe_compute_slice(vis_set.antenna2, start_row, end_row)
+
+    Lx = antennas[antenna1][:, 0] - antennas[antenna2][:, 0]
+    Ly = antennas[antenna1][:, 1] - antennas[antenna2][:, 1]
+
     return {
         # Metadata
         'subms_id': subms._id,
@@ -194,24 +204,27 @@ def _extract_chunk_data(subms, vis_set, chunk_id: int, start_row: int, end_row: 
         'n_channels': n_channels,
         'n_correlations': n_correlations,
         
-        'antenna1': to_simple_array(_safe_compute_slice(vis_set.antenna1, start_row, end_row)),
-        'antenna2': to_simple_array(_safe_compute_slice(vis_set.antenna2, start_row, end_row)),
+        'antenna1': to_simple_array(antenna1),
+        'antenna2': to_simple_array(antenna2),
         'scan_number': to_simple_array(_safe_compute_slice(vis_set.scan_number, start_row, end_row)),
 
         'longitude': longitude,
         'latitude': latitude,
-        'lambda_ref': lambda_ref,
+
+        'lambda_': lambda_,
         'ra': ra,
         'dec': dec,
 
         # Timing information
         'exposure': to_simple_array(_safe_compute_slice(vis_set.dataset.EXPOSURE, start_row, end_row)),
         'interval': to_simple_array(_safe_compute_slice(vis_set.dataset.INTERVAL, start_row, end_row)),
-
         'time': to_simple_array(_safe_compute_slice(vis_set.time, start_row, end_row)),
-        'u': to_simple_array(_safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=0)),
-        'v': to_simple_array(_safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=1)),
-        'w': to_simple_array(_safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=2)),
+
+        'u': to_simple_array(_safe_compute_slice(uvw_lambda, start_row, end_row, coord_idx=0)),
+        'v': to_simple_array(_safe_compute_slice(uvw_lambda, start_row, end_row, coord_idx=1)),
+        'w': to_simple_array(_safe_compute_slice(uvw_lambda, start_row, end_row, coord_idx=2)),
+        'Lx': to_simple_array(Lx),
+        'Ly': to_simple_array(Ly),
 
         # Essential scientific data arrays
         'visibilities': _safe_compute_slice(vis_set.data, start_row, end_row),

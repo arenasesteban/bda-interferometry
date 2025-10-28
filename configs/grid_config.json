@@ -1,11 +1,5 @@
 {
-    "u_size": 512,
-    "v_size": 512,
-    "u_min": -1000,
-    "u_max": 1000,
-    "v_min": -1000,
-    "v_max": 1000,
     "img_size": 512,
-    "theo_resolution": 0.0,
-    "padding_factor": 1.2
+    "padding_factor": 1.2,
+    "cellsize": 5.330420255448728e-06
 }

@@ -172,12 +172,13 @@ def load_simulation_config(config_path: str = None) -> Dict[str, Any]:
     return user_config
 
 
-def update_grid_config(config_path, theo_resolution):
+def update_grid_config(config_path, theo_resolution, corr_strings):
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
         
-        config['theo_resolution'] = theo_resolution
+        config['cellsize'] = (theo_resolution / 7).value
+        config['corr_strings'] = corr_strings
         
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
