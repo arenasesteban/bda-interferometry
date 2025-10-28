@@ -2,12 +2,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 import traceback
 
+from pyspark.sql.functions import col
 
-def build_corr_map(corr_string):
-    corr_map = {}
-    for idx, corr in enumerate(corr_string.split(',')):
-        corr_map[idx] = corr.strip()
-    return corr_map
+
+def build_corr_map(corrs_string):
+    if isinstance(corrs_string, list):
+        if len(corrs_string) > 0 and isinstance(corrs_string[0], list):
+            corrs = corrs_string[0]
+        else:
+            corrs = corrs_string
+    else:
+        corrs = [c.strip() for c in corrs_string.split(',')]
+    return {idx: corr for idx, corr in enumerate(corrs)}
 
 
 def dataframe_to_grid(gridded_df, grid_config):
@@ -17,25 +23,24 @@ def dataframe_to_grid(gridded_df, grid_config):
     imsize = [img_size, img_size]
     u_size, v_size = int(imsize[0] * padding_factor), int(imsize[1] * padding_factor)
 
-    grids = {}
-    weights = {}
+    corrs_names = build_corr_map(grid_config['corrs_string'])
 
-    corr_names = build_corr_map(grid_config['corr_string'])
-
-    for name in corr_names.values():
-        grids[name] = np.zeros((u_size, v_size), dtype=np.complex128)
-        weights[name] = np.zeros((u_size, v_size), dtype=np.float64)
+    grids = np.zeros((u_size, v_size), dtype=np.complex128)
 
     try:
-        for idx, name in corr_names.items():
-            df_corr = gridded_df.filter(gridded_df.corr == idx)
-            rows = df_corr.collect()
+        for idx, name in corrs_names.items():
+            if name == 'XX' or name == 'YY' or name == 'RR' or name == 'LL':
+                df_corr = gridded_df.filter(col("corr") == idx)
+                rows = df_corr.collect()
 
-            for row in rows:
-                u = row.u_pix
-                v = row.v_pix
-                grids[name][u, v] += row.vs_real + 1j * row.vs_imag
-                weights[name][u, v] += row.weights
+                for row in rows:
+                    u = row.u_pix
+                    v = row.v_pix
+                    grids[u, v] += row.vs_real + 1j * row.vs_imag
+
+        corrs_set = set(corrs_names.values())
+        if corrs_set >= {'XX', 'YY'} or corrs_set >= {'RR', 'LL'}:
+            return grids * 0.5
         
         return grids
 
@@ -45,22 +50,12 @@ def dataframe_to_grid(gridded_df, grid_config):
         raise
 
 
-def compute_stokes_I(grids):
-    if 'XX' in grids and 'YY' in grids:
-        return (grids['XX'] + grids['YY']) * 0.5
-    if 'RR' in grids and 'LL' in grids:
-        return (grids['RR'] + grids['LL']) * 0.5
+def generate_dirty_image(gridded_df, grid_config):
+    print("Dataframe to grid conversion...")
+    grids = dataframe_to_grid(gridded_df, grid_config)
 
-    for pref in ('XX', 'RR'):
-        if pref in grids:
-            return grids[pref]
-
-
-def generate_dirty_image(gridded_df, grid_config):    
-    grids, normalized_ws = dataframe_to_grid(gridded_df, grid_config)
-    vs_grid = compute_stokes_I(grids)
-
-    fourier = np.fft.ifftshift(vs_grid * normalized_ws)
+    print("Generating dirty image via IFFT...")
+    fourier = np.fft.ifftshift(grids)
     dirty_image = np.fft.ifft2(fourier)
     dirty_image = np.fft.fftshift(np.abs(dirty_image))
 
@@ -71,9 +66,9 @@ def save_dirty_image(dirty_image):
     plt.figure(figsize=(8, 8))
     plt.imshow(dirty_image, cmap='hot', origin='lower')
     plt.colorbar(label='Intensity')
-    plt.title('Dirty Image - BDA')
+    plt.title('Dirty Image')
     plt.xlabel('X [pixels]')
     plt.ylabel('Y [pixels]')
     plt.tight_layout()
-    plt.savefig('dirty_image_bda.png')
+    plt.savefig('dirty_image.png')
     plt.close()
