@@ -172,6 +172,21 @@ def load_simulation_config(config_path: str = None) -> Dict[str, Any]:
     return user_config
 
 
+def update_grid_config(config_path, theo_resolution):
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        config['theo_resolution'] = theo_resolution
+        
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
+            
+    except Exception as e:
+        print(f"Error updating grid config: {e}")
+        raise
+
+
 def serialize_chunk(chunk: Dict[str, Any]) -> bytes:
     """
     Serialize visibility chunk using optimized MessagePack with lossless compression.
@@ -483,6 +498,12 @@ def run_producer_service(antenna_config_path: str,
             gaussian_minor_radius=sim_config["gaussian_minor_radius"],
             gaussian_major_radius=sim_config["gaussian_major_radius"],
             gaussian_theta_angle=sim_config["gaussian_theta_angle"]
+        )
+
+        # Update grid configuration with theoretical resolution
+        update_grid_config(
+            config_path="./configs/grid_config.json",
+            theo_resolution=dataset.theo_resolution
         )
 
         # Create producer and stream chunks with advanced telemetry

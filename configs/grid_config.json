@@ -4,5 +4,8 @@
     "u_min": -1000,
     "u_max": 1000,
     "v_min": -1000,
-    "v_max": 1000
+    "v_max": 1000,
+    "img_size": 512,
+    "theo_resolution": 0.0,
+    "padding_factor": 1.2
 }
