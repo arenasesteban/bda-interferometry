@@ -19,7 +19,7 @@ def apply_gridding(df, grid_config):
         gridded = scientific_df.rdd.mapPartitions(grid_data)
         gridded_rdd = df.sparkSession.createDataFrame(gridded, define_grid_schema())
 
-        gridded_acc = gridded_rdd.groupBy("chan", "corr", "u_pix", "v_pix").agg(
+        gridded_acc = gridded_rdd.groupBy("chan", "u_pix", "v_pix").agg(
             F.sum("vs_real").alias("vs_real"),
             F.sum("vs_imag").alias("vs_imag"),
             F.sum("weights").alias("weights")
@@ -45,10 +45,12 @@ def process_gridding(iterator, grid_config):
         grid_size = [int(imsize[0] * padding_factor), int(imsize[1] * padding_factor)]
         uvcellsize = [1 / (cellsize * grid_size[0]), 1 / (cellsize * grid_size[1])]
 
+        corrs_names = build_corr_map(grid_config['corrs_string'])
+
         for row in iterator:
             u, v = row.u, row.v
-            u_pix, v_pix = uv_to_grid_index(u, v, uvcellsize, imsize)
-            u_pix_h, v_pix_h = uv_to_grid_index(-u, -v, uvcellsize, imsize)
+            u_pix, v_pix = uv_to_grid_index(u, v, uvcellsize, grid_size)
+            u_pix_h, v_pix_h = uv_to_grid_index(-u, -v, uvcellsize, grid_size)
 
             if not (0 <= u_pix < grid_size[0]) or not (0 <= v_pix < grid_size[1]):
                 continue
@@ -66,13 +68,17 @@ def process_gridding(iterator, grid_config):
                     if flags[chan][corr]:
                         continue
 
+                    corr_name = corrs_names[corr]
+                    if corr_name not in {'XX', 'YY', 'RR', 'LL'}:
+                        continue
+
                     vs_real = visibilities[chan][corr][0]
                     vs_imag = visibilities[chan][corr][1]
                     vs_complex = complex(vs_real, vs_imag)
 
                     ws = weights[corr] * 0.5
 
-                    grid_key = (chan, corr, u_pix, v_pix)
+                    grid_key = (chan, u_pix, v_pix)
 
                     if grid_key not in accumulated_grid:
                         accumulated_grid[grid_key] = {
@@ -85,7 +91,7 @@ def process_gridding(iterator, grid_config):
                         accumulated_grid[grid_key]['vs_imag'] += vs_complex.imag * ws
                         accumulated_grid[grid_key]['weights'] += ws
 
-                    grid_key_h = (chan, corr, u_pix_h, v_pix_h)
+                    grid_key_h = (chan, u_pix_h, v_pix_h)
 
                     if grid_key_h not in accumulated_grid:
                         accumulated_grid[grid_key_h] = {
@@ -99,10 +105,9 @@ def process_gridding(iterator, grid_config):
                         accumulated_grid[grid_key_h]['weights'] += ws
             
         if accumulated_grid:
-            for (chan, corr, u_pix, v_pix), values in accumulated_grid.items():
+            for (chan, u_pix, v_pix), values in accumulated_grid.items():
                 yield (
                     int(chan),
-                    int(corr),
                     int(u_pix),
                     int(v_pix),
                     values['vs_real'],
@@ -116,9 +121,20 @@ def process_gridding(iterator, grid_config):
         raise
 
 
-def uv_to_grid_index(u, v, uvcellsize, imsize):
-    u_pix = int((u / uvcellsize[0]) + (imsize[0] // 2) + 0.5)
-    v_pix = int((v / uvcellsize[1]) + (imsize[1] // 2) + 0.5)
+def build_corr_map(corrs_string):
+    if isinstance(corrs_string, list):
+        if len(corrs_string) > 0 and isinstance(corrs_string[0], list):
+            corrs = corrs_string[0]
+        else:
+            corrs = corrs_string
+    else:
+        corrs = [c.strip() for c in corrs_string.split(',')]
+    return {idx: corr for idx, corr in enumerate(corrs)}
+
+
+def uv_to_grid_index(u, v, uvcellsize, grid_size):
+    u_pix = int((u / uvcellsize[0]) + (grid_size[0] // 2) + 0.5)
+    v_pix = int((v / uvcellsize[1]) + (grid_size[1] // 2) + 0.5)
 
     return u_pix, v_pix
 
@@ -150,7 +166,6 @@ def load_grid_config(config_path):
 def define_grid_schema():
     return StructType([
         StructField("chan", IntegerType(), True),
-        StructField("corr", IntegerType(), True),
         StructField("u_pix", IntegerType(), True),
         StructField("v_pix", IntegerType(), True),
         StructField("vs_real", DoubleType(), True),
@@ -161,7 +176,7 @@ def define_grid_schema():
 
 def consolidate_gridding(gridded_rdd):
     try:
-        grid_acc = gridded_rdd.groupBy("chan", "corr", "u_pix", "v_pix").agg(
+        grid_acc = gridded_rdd.groupBy("chan", "u_pix", "v_pix").agg(
             F.sum("vs_real").alias("vs_real"),
             F.sum("vs_imag").alias("vs_imag"),
             F.sum("weights").alias("weights")
@@ -170,7 +185,7 @@ def consolidate_gridding(gridded_rdd):
         grid_avg = (grid_acc
            .withColumn("vs_real", F.when(F.col("weights") > 0, F.col("vs_real")/F.col("weights")).otherwise(F.lit(0.0)))
            .withColumn("vs_imag", F.when(F.col("weights") > 0, F.col("vs_imag")/F.col("weights")).otherwise(F.lit(0.0)))
-           .select("chan","corr","u_pix","v_pix","vs_real","vs_imag","weights"))
+           .select("chan", "u_pix", "v_pix", "vs_real", "vs_imag", "weights"))
 
         return grid_avg
 
