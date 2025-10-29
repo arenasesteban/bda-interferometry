@@ -180,8 +180,8 @@ def _extract_chunk_data(subms, antennas, vis_set, chunk_id: int, start_row: int,
     
     chunk_size = end_row - start_row
 
-    uvw_lambda = vis_set.uvw.get_uvw_lambda(ref_nu, as_xarray=True)
-    lambda_ = c.value / ref_nu
+    uvw_lambda = vis_set.get_uvw_lambda(ref_nu, as_xarray=True)
+    lambda_ = (c.value / ref_nu).value
 
     antenna1 = _safe_compute_slice(vis_set.antenna1, start_row, end_row)
     antenna2 = _safe_compute_slice(vis_set.antenna2, start_row, end_row)
@@ -220,9 +220,9 @@ def _extract_chunk_data(subms, antennas, vis_set, chunk_id: int, start_row: int,
         'interval': to_simple_array(_safe_compute_slice(vis_set.dataset.INTERVAL, start_row, end_row)),
         'time': to_simple_array(_safe_compute_slice(vis_set.time, start_row, end_row)),
 
-        'u': to_simple_array(_safe_compute_slice(uvw_lambda, start_row, end_row, coord_idx=0)),
-        'v': to_simple_array(_safe_compute_slice(uvw_lambda, start_row, end_row, coord_idx=1)),
-        'w': to_simple_array(_safe_compute_slice(uvw_lambda, start_row, end_row, coord_idx=2)),
+        'u': to_simple_array(_safe_compute_slice(uvw_lambda, start_row, end_row, coord_idx=0).value),
+        'v': to_simple_array(_safe_compute_slice(uvw_lambda, start_row, end_row, coord_idx=1).value),
+        'w': to_simple_array(_safe_compute_slice(uvw_lambda, start_row, end_row, coord_idx=2).value),
         'Lx': to_simple_array(Lx),
         'Ly': to_simple_array(Ly),
 
