@@ -172,14 +172,14 @@ def load_simulation_config(config_path: str = None) -> Dict[str, Any]:
     return user_config
 
 
-def update_grid_config(config_path, theo_resolution, corr_strings):
+def update_grid_config(config_path, theo_resolution, corrs_string):
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
         
         config['cellsize'] = (theo_resolution / 7).value
-        config['corr_strings'] = corr_strings
-        
+        config['corrs_string'] = corrs_string
+
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
             
@@ -504,7 +504,8 @@ def run_producer_service(antenna_config_path: str,
         # Update grid configuration with theoretical resolution
         update_grid_config(
             config_path="./configs/grid_config.json",
-            theo_resolution=dataset.theo_resolution
+            theo_resolution=dataset.theo_resolution,
+            corrs_string=dataset.polarization.corrs_string
         )
 
         # Create producer and stream chunks with advanced telemetry

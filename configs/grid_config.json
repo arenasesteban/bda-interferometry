@@ -1,5 +1,11 @@
 {
     "img_size": 512,
     "padding_factor": 1.2,
-    "cellsize": 5.330420255448728e-06
+    "cellsize": 5.330420255448728e-06,
+    "corrs_string": [
+        [
+            "XX",
+            "YY"
+        ]
+    ]
 }
