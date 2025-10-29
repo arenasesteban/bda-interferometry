@@ -300,13 +300,13 @@ def process_streaming_batch(df, epoch_id, bda_config, grid_config):
         print("Rows in microbatch:", df.count())
 
         # Apply distributed BDA pipeline to processed visibility data
-        bda_result = apply_bda(df, bda_config)
+        """ bda_result = apply_bda(df, bda_config)
 
         processing_time = (time.time() - start_time) * 1000
-        print(f"BDA processing completed in {processing_time:.0f} ms.\n")
+        print(f"BDA processing completed in {processing_time:.0f} ms.\n") """
         
         # Apply distributed gridding to BDA-processed data
-        grid_result = apply_gridding(bda_result, grid_config)
+        grid_result = apply_gridding(df, grid_config)
 
         processing_time = (time.time() - start_time) * 1000
         print(f"Gridding processing completed in {processing_time:.0f} ms.\n")
@@ -382,11 +382,11 @@ def run_consumer(kafka_servers: str = "localhost:9092",
             .start()
 
         print("Consumer ready.")
-        query.awaitTermination(timeout=100)
+        query.awaitTermination(timeout=70)
 
         print("Combining gridded visibilities...")
         gridded_visibilities_df = reduce(DataFrame.unionByName, gridded_visibilities)
-        final_gridded = consolide_gridding(gridded_visibilities_df)
+        final_gridded = consolidate_gridding(gridded_visibilities_df)
 
         print("Generating dirty image...")
         generate_dirty_image(final_gridded, grid_config)
