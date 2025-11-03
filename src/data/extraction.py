@@ -52,14 +52,14 @@ def stream_subms_chunks(dataset, longitude, latitude) -> Generator[Dict[str, Any
     ra = sky_coord.ra.rad
     dec = sky_coord.dec.rad
 
-    for subms in dataset.ms_list:
+    for subms, spws in zip(dataset.ms_list, dataset.spws.dataset):
         if subms is None or subms.visibilities is None:
             continue
 
-        yield from _extract_subms_chunks(subms, antennas, longitude, latitude, ref_nu, ra, dec)
+        yield from _extract_subms_chunks(subms, spws, antennas, longitude, latitude, ref_nu, ra, dec)
 
 
-def _extract_subms_chunks(subms, antennas, longitude, latitude, ref_nu, ra, dec) -> Generator[Dict[str, Any], None, None]:
+def _extract_subms_chunks(subms, spws, antennas, longitude, latitude, ref_nu, ra, dec) -> Generator[Dict[str, Any], None, None]:
     """
     Extract chunks from a single SubMS object.
     
@@ -83,7 +83,8 @@ def _extract_subms_chunks(subms, antennas, longitude, latitude, ref_nu, ra, dec)
     nrows = vis.nrows
     n_channels = vis.data.shape[1]
     n_correlations = vis.data.shape[2]
-    
+    chan_freq = spws.CHAN_FREQ.compute().values[0]
+
     # Determine chunk size based on Dask chunks or default
     chunk_size = _get_optimal_chunk_size(vis)
     
@@ -94,7 +95,7 @@ def _extract_subms_chunks(subms, antennas, longitude, latitude, ref_nu, ra, dec)
         
         chunk = _extract_chunk_data(
             subms, antennas, vis, chunk_id, start_row, end_row, 
-            n_channels, n_correlations,
+            n_channels, n_correlations, chan_freq,
             longitude,
             latitude,
             ref_nu, ra, dec,
@@ -147,7 +148,7 @@ def to_simple_array(np_array):
     
 
 def _extract_chunk_data(subms, antennas, vis_set, chunk_id: int, start_row: int, end_row: int,
-                       n_channels: int, n_correlations: int, longitude, latitude, ref_nu, ra, dec) -> Dict[str, Any]:
+                       n_channels: int, n_correlations: int, chan_freq, longitude, latitude, ref_nu, ra, dec) -> Dict[str, Any]:
     """
     Extract raw data for a specific chunk range.
     
@@ -180,7 +181,6 @@ def _extract_chunk_data(subms, antennas, vis_set, chunk_id: int, start_row: int,
     
     chunk_size = end_row - start_row
 
-    uvw_lambda = vis_set.get_uvw_lambda(ref_nu, as_xarray=True)
     lambda_ = (c.value / ref_nu).value
 
     antenna1 = _safe_compute_slice(vis_set.antenna1, start_row, end_row)
@@ -203,7 +203,8 @@ def _extract_chunk_data(subms, antennas, vis_set, chunk_id: int, start_row: int,
         
         'n_channels': n_channels,
         'n_correlations': n_correlations,
-        
+        'chan_freq': chan_freq,
+
         'antenna1': to_simple_array(antenna1),
         'antenna2': to_simple_array(antenna2),
         'scan_number': to_simple_array(_safe_compute_slice(vis_set.scan_number, start_row, end_row)),
@@ -220,9 +221,9 @@ def _extract_chunk_data(subms, antennas, vis_set, chunk_id: int, start_row: int,
         'interval': to_simple_array(_safe_compute_slice(vis_set.dataset.INTERVAL, start_row, end_row)),
         'time': to_simple_array(_safe_compute_slice(vis_set.time, start_row, end_row)),
 
-        'u': to_simple_array(_safe_compute_slice(uvw_lambda, start_row, end_row, coord_idx=0).value),
-        'v': to_simple_array(_safe_compute_slice(uvw_lambda, start_row, end_row, coord_idx=1).value),
-        'w': to_simple_array(_safe_compute_slice(uvw_lambda, start_row, end_row, coord_idx=2).value),
+        'u': to_simple_array(_safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=0)),
+        'v': to_simple_array(_safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=1)),
+        'w': to_simple_array(_safe_compute_slice(vis_set.uvw, start_row, end_row, coord_idx=2)),
         'Lx': to_simple_array(Lx),
         'Ly': to_simple_array(Ly),
 

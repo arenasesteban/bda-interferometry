@@ -332,6 +332,8 @@ def stream_chunks_to_kafka(dataset, producer, topic: str,
     MAX_PENDING_FUTURES = 30        # Reduced for max_in_flight=3
     HIGH_LATENCY_THRESHOLD = 3000.0  # ms (more realistic for acks='all')
 
+    count = 0
+
     try:
         for chunk in stream_subms_chunks(dataset, longitude, latitude):
             chunk_start_time = time.time()
@@ -413,6 +415,10 @@ def stream_chunks_to_kafka(dataset, producer, topic: str,
                 metrics.failed_chunks += 1
                 metrics.logger.info(f"✗ Error processing chunk {key}: {e}")
                 continue
+
+            """ count += 1
+            if count > 0:
+                break """
 
     except Exception as e:
         metrics.logger.info(f"❌ Critical streaming error: {e}")

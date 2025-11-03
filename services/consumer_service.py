@@ -38,8 +38,10 @@ def define_visibility_schema():
         StructField("row_start", IntegerType(), True),
         StructField("row_end", IntegerType(), True),
         StructField("nrows", IntegerType(), True),
+
         StructField("n_channels", IntegerType(), True),
         StructField("n_correlations", IntegerType(), True),
+        StructField("chan_freq", ArrayType(DoubleType()), True),
 
         StructField("antenna1", IntegerType(), True),
         StructField("antenna2", IntegerType(), True),
@@ -71,7 +73,7 @@ def define_visibility_schema():
         StructField("flag", ArrayType(ArrayType(IntegerType())), True)
     ])
 
-def deserialize_array(field_dict, field_name, expected_shapes):
+def deserialize_array(field_dict, field_name, expected_shapes=None):
     try:
         if not isinstance(field_dict, dict):
             print(f"Error {field_name} is not a dict: {type(field_dict)}")
@@ -103,6 +105,9 @@ def deserialize_array(field_dict, field_name, expected_shapes):
             array = np.frombuffer(binary_data, dtype=np.float32)
         elif 'flag' in field_name.lower():
             array = np.frombuffer(binary_data, dtype=np.bool_)
+        elif 'chan_freq' in field_name.lower() or 'freq' in field_name.lower():
+            array = np.frombuffer(binary_data, dtype=np.float64)
+            return array.astype(float).tolist()
         else:
             print(f"Error unknown field type for {field_name}")
             return np.array([])
@@ -173,6 +178,7 @@ def process_chunk(chunk):
         dec = float(chunk.get('dec', 0.0))
 
         # Get the lists from the chunk
+        chan_freq = chunk.get('chan_freq', [])
         antenna1 = chunk.get('antenna1', [])
         antenna2 = chunk.get('antenna2', [])
         scan_number = chunk.get('scan_number', [])
@@ -191,6 +197,7 @@ def process_chunk(chunk):
             'flag': (nrows, n_channels, n_correlations)
         }
 
+        chan_freq = deserialize_array(chunk.get('chan_freq', []), 'chan_freq')
         visibilities = deserialize_array(chunk.get('visibilities', []), 'visibilities', expected_shapes)
         weight = deserialize_array(chunk.get('weight', []), 'weight', expected_shapes)
         flag = deserialize_array(chunk.get('flag', []), 'flag', expected_shapes)
@@ -212,6 +219,7 @@ def process_chunk(chunk):
                     'nrows': nrows,
                     'n_channels': n_channels,
                     'n_correlations': n_correlations,
+                    'chan_freq': [float(x) for x in chan_freq],
                     'antenna1': int(a1),
                     'antenna2': int(a2),
                     'scan_number': int(sc),
@@ -263,6 +271,7 @@ def deserialize_chunk_to_rows(iterator):
                     row.get('nrows'),
                     row.get('n_channels'),
                     row.get('n_correlations'),
+                    row.get('chan_freq'),
                     row.get('antenna1'),
                     row.get('antenna2'),
                     row.get('scan_number'),
@@ -298,6 +307,10 @@ def process_streaming_batch(df, epoch_id, bda_config, grid_config):
     
     try:       
         print("Rows in microbatch:", df.count())
+
+        """ rows = df.collect()
+        for row in rows:
+            print(f"Row: antenna1={row.antenna1}, antenna2={row.antenna2}, u={row.u}, v={row.v}") """
 
         # Apply distributed BDA pipeline to processed visibility data
         """ bda_result = apply_bda(df, bda_config)
@@ -387,6 +400,11 @@ def run_consumer(kafka_servers: str = "localhost:9092",
         print("Combining gridded visibilities...")
         gridded_visibilities_df = reduce(DataFrame.unionByName, gridded_visibilities)
         final_gridded = consolidate_gridding(gridded_visibilities_df)
+
+        rows = final_gridded.collect()
+        for row in rows:
+            print(f"Gridded Row: u={row.u_pix}, v={row.v_pix}, vs_real={row.vs_real}, vs_imag={row.vs_imag}")
+        print("Grid rows: ", final_gridded.count())
 
         print("Generating dirty image...")
         generate_dirty_image(final_gridded, grid_config)
