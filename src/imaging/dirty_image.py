@@ -1,8 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import traceback
-
-from pyspark.sql.functions import col
 
 
 def dataframe_to_grid(gridded_df, grid_config):
@@ -12,26 +9,22 @@ def dataframe_to_grid(gridded_df, grid_config):
     imsize = [img_size, img_size]
     u_size, v_size = int(imsize[0] * padding_factor), int(imsize[1] * padding_factor)
 
-    grids = np.zeros((u_size, v_size), dtype=np.complex128)
-    weights = np.zeros((u_size, v_size), dtype=np.float64)
+    grids = np.zeros((v_size, u_size), dtype=np.complex128)
+    weights = np.zeros((v_size, u_size), dtype=np.float64)
 
     rows = gridded_df.collect()
-
     for row in rows:
         u = row.u_pix
         v = row.v_pix
-        grids[u, v] += row.vs_real + 1j * row.vs_imag
-        weights[u, v] += row.weights
+        grids[v, u] += row.vs_real + 1j * row.vs_imag
+        weights[v, u] += row.weights
 
-    ws_sum = np.sum(weights)
-    normalized_weights = weights / ws_sum if ws_sum > 0 else weights
-
-    return grids * 0.5, normalized_weights
+    return grids * 0.5, weights
 
 
 def generate_dirty_image(gridded_df, grid_config):
     print("Dataframe to grid conversion...")
-    grids, normalized_weights = dataframe_to_grid(gridded_df, grid_config)
+    grids, weights = dataframe_to_grid(gridded_df, grid_config)
 
     img_size = grid_config["img_size"]
     padding_factor = grid_config["padding_factor"]
@@ -39,7 +32,7 @@ def generate_dirty_image(gridded_df, grid_config):
     grid_size = [int(imsize[0] * padding_factor), int(imsize[1] * padding_factor)]
 
     print("Generating dirty image via IFFT...")
-    fourier = np.fft.ifftshift(grids * normalized_weights)
+    fourier = np.fft.ifftshift(grids * weights)
     dirty_image = np.fft.ifft2(fourier, norm= 'forward')
     dirty_image = np.fft.fftshift(np.abs(dirty_image))
 
@@ -54,7 +47,7 @@ def generate_dirty_image(gridded_df, grid_config):
     
     print("Generating PSF image via IFFT...")
 
-    fourier_psf = np.fft.ifftshift(normalized_weights)
+    fourier_psf = np.fft.ifftshift(weights)
     psf_image = np.fft.ifft2(fourier_psf, norm= 'forward')
     psf_image = np.fft.fftshift(np.abs(psf_image))
 
