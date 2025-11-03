@@ -81,17 +81,15 @@ def average_visibilities(visibilities, weights, flags):
         raise
 
 
-def average_uvw(u, v, w):
+def average_uv(u, v):
     try:
         us = np.array(u, dtype=np.float64)
         vs = np.array(v, dtype=np.float64)
-        ws = np.array(w, dtype=np.float64)
 
         u_avg = np.mean(us)
         v_avg = np.mean(vs)
-        w_avg = np.mean(ws)
 
-        return float(u_avg), float(v_avg), float(w_avg)
+        return float(u_avg), float(v_avg)
 
     except Exception as e:
         print(f"Error averaging fields: {e}")

@@ -1,7 +1,7 @@
 import numpy as np
 import traceback
 
-from .bda_core import calculate_decorrelation_time, calculate_uv_rate, average_visibilities, average_uvw
+from .bda_core import calculate_decorrelation_time, calculate_uv_rate, average_visibilities, average_uv
 
 
 def create_window(row, start_time, decorr_time):
@@ -38,7 +38,7 @@ def create_window(row, start_time, decorr_time):
         raise
 
 
-def add_window(window, interval, exposure, time, u, v, w, visibilities, weight, flag):
+def add_window(window, interval, exposure, time, u, v, visibilities, weight, flag):
     try:
         window['nrows'] += 1
         window['interval'].append(interval)
@@ -46,7 +46,6 @@ def add_window(window, interval, exposure, time, u, v, w, visibilities, weight, 
         window['time'].append(time)
         window['u'].append(u)
         window['v'].append(v)
-        window['w'].append(w)
 
         vs = np.array(visibilities, dtype=np.float64)
         ws = np.array(weight, dtype=np.float64)
@@ -112,8 +111,7 @@ def complete_window(window, baseline_key):
 
         visibilities, weights, flags = window['visibilities'], window['weight'], window['flag']
         avg_vis, avg_weight, flag_avg = average_visibilities(visibilities, weights, flags)
-        u_avg, v_avg, w_avg = average_uvw(window['u'], window['v'], window['w'])
-
+        u_avg, v_avg = average_uv(window['u'], window['v'])
 
         interval_avg = float(calculate_window_duration(window['time'], window['interval']))
         exposures = np.array(window['exposure'])
@@ -141,7 +139,6 @@ def complete_window(window, baseline_key):
             'time': window['start_time'],
             'u': u_avg,
             'v': v_avg,
-            'w': w_avg,
             'visibilities': avg_vis,
             'weight': avg_weight,
             'flag': flag_avg

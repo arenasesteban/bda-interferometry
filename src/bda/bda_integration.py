@@ -60,7 +60,6 @@ def convert_window_to_tuple(window):
             window['time'],
             window['u'],
             window['v'],
-            window['w'],
             window['visibilities'],
             window['weight'],
             window['flag']
@@ -97,7 +96,6 @@ def define_bda_schema():
         StructField('time', DoubleType(), True),
         StructField('u', DoubleType(), True),
         StructField('v', DoubleType(), True),
-        StructField('w', DoubleType(), True),
 
         StructField('visibilities', ArrayType(ArrayType(ArrayType(DoubleType()))), True),
         StructField('weight', ArrayType(DoubleType()), True),

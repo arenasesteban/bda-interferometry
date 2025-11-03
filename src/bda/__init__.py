@@ -1,6 +1,6 @@
 from .bda_integration import apply_bda
 from .bda_processor import process_rows
-from .bda_core import calculate_decorrelation_time, calculate_uv_rate, average_visibilities, average_uvw
+from .bda_core import calculate_decorrelation_time, calculate_uv_rate, average_visibilities, average_uv
 from .bda_config import load_bda_config
 
 __all__ = [
@@ -9,6 +9,6 @@ __all__ = [
     'calculate_decorrelation_time',
     'calculate_uv_rate',
     'average_visibilities',
-    'average_uvw',
+    'average_uv',
     'load_bda_config'
 ]
