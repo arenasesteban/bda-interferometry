@@ -9,6 +9,7 @@ as compressed chunks to Kafka topics for real-time data transmission.
 """
 
 import sys
+import traceback
 import msgpack
 import numpy as np
 import zlib
@@ -172,19 +173,40 @@ def load_simulation_config(config_path: str = None) -> Dict[str, Any]:
     return user_config
 
 
-def update_grid_config(config_path, theo_resolution, corrs_string):
+def update_bda_config(config_path, phase_direction_cosines):
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+
+        direction_cosines = phase_direction_cosines.value
+
+        config['l'] = direction_cosines[0].tolist()
+        config['m'] = direction_cosines[1].tolist()
+
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
+            
+    except Exception as e:
+        print(f"Error updating BDA config: {e}")
+        traceback.print_exc()
+        raise
+
+
+def update_grid_config(config_path, theo_resolution, corrs_string, chan_freq):
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
         
         config['cellsize'] = (theo_resolution / 7).value
         config['corrs_string'] = corrs_string
+        config['chan_freq'] = chan_freq
 
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
             
     except Exception as e:
         print(f"Error updating grid config: {e}")
+        traceback.print_exc()
         raise
 
 
@@ -507,11 +529,17 @@ def run_producer_service(antenna_config_path: str,
             gaussian_theta_angle=sim_config["gaussian_theta_angle"]
         )
 
+        update_bda_config(
+            config_path="./configs/bda_config.json",
+            phase_direction_cosines=dataset.field.phase_direction_cosines
+        )
+
         # Update grid configuration with theoretical resolution
         update_grid_config(
             config_path="./configs/grid_config.json",
             theo_resolution=dataset.theo_resolution,
-            corrs_string=dataset.polarization.corrs_string
+            corrs_string=dataset.polarization.corrs_string,
+            chan_freq=dataset.spws.dataset[0].CHAN_FREQ.compute().values[0].tolist()
         )
 
         # Create producer and stream chunks with advanced telemetry

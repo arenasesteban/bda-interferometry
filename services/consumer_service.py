@@ -7,6 +7,7 @@ import msgpack
 import numpy as np
 import zlib
 import uuid
+import matplotlib.pyplot as plt
 
 from pyspark.sql.types import (
     StringType, StructType, StructField, IntegerType,
@@ -41,7 +42,6 @@ def define_visibility_schema():
 
         StructField("n_channels", IntegerType(), True),
         StructField("n_correlations", IntegerType(), True),
-        StructField("chan_freq", ArrayType(DoubleType()), True),
 
         StructField("antenna1", IntegerType(), True),
         StructField("antenna2", IntegerType(), True),
@@ -105,9 +105,6 @@ def deserialize_array(field_dict, field_name, expected_shapes=None):
             array = np.frombuffer(binary_data, dtype=np.float32)
         elif 'flag' in field_name.lower():
             array = np.frombuffer(binary_data, dtype=np.bool_)
-        elif 'chan_freq' in field_name.lower() or 'freq' in field_name.lower():
-            array = np.frombuffer(binary_data, dtype=np.float64)
-            return array.astype(float).tolist()
         else:
             print(f"Error unknown field type for {field_name}")
             return np.array([])
@@ -178,7 +175,6 @@ def process_chunk(chunk):
         dec = float(chunk.get('dec', 0.0))
 
         # Get the lists from the chunk
-        chan_freq = chunk.get('chan_freq', [])
         antenna1 = chunk.get('antenna1', [])
         antenna2 = chunk.get('antenna2', [])
         scan_number = chunk.get('scan_number', [])
@@ -197,7 +193,6 @@ def process_chunk(chunk):
             'flag': (nrows, n_channels, n_correlations)
         }
 
-        chan_freq = deserialize_array(chunk.get('chan_freq', []), 'chan_freq')
         visibilities = deserialize_array(chunk.get('visibilities', []), 'visibilities', expected_shapes)
         weight = deserialize_array(chunk.get('weight', []), 'weight', expected_shapes)
         flag = deserialize_array(chunk.get('flag', []), 'flag', expected_shapes)
@@ -219,7 +214,6 @@ def process_chunk(chunk):
                     'nrows': nrows,
                     'n_channels': n_channels,
                     'n_correlations': n_correlations,
-                    'chan_freq': [float(x) for x in chan_freq],
                     'antenna1': int(a1),
                     'antenna2': int(a2),
                     'scan_number': int(sc),
@@ -271,7 +265,6 @@ def deserialize_chunk_to_rows(iterator):
                     row.get('nrows'),
                     row.get('n_channels'),
                     row.get('n_correlations'),
-                    row.get('chan_freq'),
                     row.get('antenna1'),
                     row.get('antenna2'),
                     row.get('scan_number'),
@@ -307,24 +300,20 @@ def process_streaming_batch(df, epoch_id, bda_config, grid_config):
     
     try:       
         print("Rows in microbatch:", df.count())
-
-        """ rows = df.collect()
-        for row in rows:
-            print(f"Row: antenna1={row.antenna1}, antenna2={row.antenna2}, u={row.u}, v={row.v}") """
-
-        # Apply distributed BDA pipeline to processed visibility data
-        """ bda_result = apply_bda(df, bda_config)
-
-        processing_time = (time.time() - start_time) * 1000
-        print(f"BDA processing completed in {processing_time:.0f} ms.\n") """
         
+        # Apply distributed BDA pipeline to processed visibility data
+        bda_result = apply_bda(df, bda_config)
+
+        """ processing_time = (time.time() - start_time) * 1000
+        print(f"BDA processing completed in {processing_time:.0f} ms.\n")
+
         # Apply distributed gridding to BDA-processed data
-        grid_result = apply_gridding(df, grid_config)
+        grid_result = apply_gridding(bda_result, grid_config)
 
         processing_time = (time.time() - start_time) * 1000
-        print(f"Gridding processing completed in {processing_time:.0f} ms.\n")
+        print(f"Gridding processing completed in {processing_time:.0f} ms.\n") """
 
-        return grid_result
+        return bda_result
 
     except Exception as e:
         print(f"Error in microbatch {epoch_id}: {e}")
@@ -379,7 +368,6 @@ def run_consumer(kafka_servers: str = "localhost:9092",
             deserialized_df = spark.createDataFrame(deserialized_rdd, visibility_row_schema)
 
             grid_result = process_streaming_batch(deserialized_df, epoch_id, bda_config, grid_config)
-            
             if grid_result is not None:
                 gridded_visibilities.append(grid_result)
 
@@ -397,14 +385,64 @@ def run_consumer(kafka_servers: str = "localhost:9092",
         print("Consumer ready.")
         query.awaitTermination(timeout=70)
 
+        """ def plot_uv_coverage(u, v, title="UV Coverage", ax=None, color='red'):
+            if ax is None:
+                fig, ax = plt.subplots(figsize=(8, 8))
+
+            ax.scatter(u, v, s=1, alpha=0.5, c=color)
+            ax.scatter(-u, -v, s=1, alpha=0.5, c=color)
+
+            ax.set_xlabel('u (wavelengths)')
+            ax.set_ylabel('v (wavelengths)')
+            ax.set_title(title)
+            ax.set_aspect('equal')
+            ax.grid(True, alpha=0.3)
+            ax.axhline(0, color='k', linewidth=0.5)
+            ax.axvline(0, color='k', linewidth=0.5)
+            
+            return ax """
+
+        """ original_df = reduce(DataFrame.unionByName, original_visibilities)
+
+        u = []
+        v = []
+
+        rows = original_df.collect()
+
+        for row in rows:
+            u.append(row.u)
+            v.append(row.v)
+
+        u = np.array(u)
+        v = np.array(v)
+    
+        fig1, ax = plt.subplots(figsize=(8, 8))
+        plot_uv_coverage(u, v, title="UV Coverage Original", ax=ax, color='red')
+        plt.savefig('uv_coverage_original.png')
+        plt.close(fig1) """
+
+        """ bda_df = reduce(DataFrame.unionByName, gridded_visibilities)
+        
+        u_bda = []
+        v_bda = []
+
+        bda_rows = bda_df.collect()
+
+        for row in bda_rows:
+            u_bda.append(row.u)
+            v_bda.append(row.v)
+
+        u_bda = np.array(u_bda)
+        v_bda = np.array(v_bda)
+
+        fig2, bx = plt.subplots(figsize=(8, 8))
+        plot_uv_coverage(u_bda, v_bda, title="UV Coverage after BDA", ax=bx, color='blue')
+        plt.savefig('uv_coverage_bda.png')
+        plt.close(fig2) """
+
         print("Combining gridded visibilities...")
         gridded_visibilities_df = reduce(DataFrame.unionByName, gridded_visibilities)
         final_gridded = consolidate_gridding(gridded_visibilities_df)
-
-        rows = final_gridded.collect()
-        for row in rows:
-            print(f"Gridded Row: u={row.u_pix}, v={row.v_pix}, vs_real={row.vs_real}, vs_imag={row.vs_imag}")
-        print("Grid rows: ", final_gridded.count())
 
         print("Generating dirty image...")
         generate_dirty_image(final_gridded, grid_config)

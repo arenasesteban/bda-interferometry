@@ -47,12 +47,11 @@ def process_gridding(iterator, grid_config):
         grid_size = [int(imsize[0] * padding_factor), int(imsize[1] * padding_factor)]
         uvcellsize = [1 / (cellsize * grid_size[0]), 1 / (cellsize * grid_size[1])]
 
+        chan_freq = grid_config["chan_freq"]
         corrs_names = build_corr_map(grid_config["corrs_string"])
 
         for row in iterator:
             u, v = row.u, row.v
-            chan_freq = row.chan_freq
-
             visibilities = row.visibilities
             weights = row.weight
             flags = row.flag
