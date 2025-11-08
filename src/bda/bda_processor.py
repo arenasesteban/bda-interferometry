@@ -95,9 +95,14 @@ def should_close_window(window, current_time, current_interval):
         times = window['time'] + [current_time]
         intervals = window['interval'] + [current_interval]
 
+        if window['decorr_time'] == float('inf'):
+            return False
+        
+        duration = calculate_window_duration(times, intervals)
+
         # Criterion: Maximum decorrelation time exceeded
-        return calculate_window_duration(times, intervals) > window['decorr_time']
-    
+        return duration > window['decorr_time']
+
     except Exception as e:
         print(f"Error checking if window should close: {e}")
         traceback.print_exc()
@@ -116,6 +121,15 @@ def complete_window(window, baseline_key):
         interval_avg = float(calculate_window_duration(window['time'], window['interval']))
         exposures = np.array(window['exposure'])
         exposure_avg = float(exposures.sum())
+
+        if baseline_key == "0-1":
+            print("BDA Window Completed:")
+            print("Baseline key: ", baseline_key)
+            print("Coords: ", u_avg, v_avg)
+            print("Flag: ", flag_avg)
+            print("Weight: ", avg_weight)
+            print("Visibilities: ", avg_vis)
+            print("-" * 40)
 
         # Return completed window with averaged values
         return {
@@ -156,10 +170,24 @@ def process_rows(iterator, bda_config):
     
     try:
         decorr_factor = bda_config.get('decorr_factor', 0.95)
-        field_offset_deg = bda_config.get('field_offset_deg', 2.0)
+        l = bda_config.get('l', 0.0)
+        m = bda_config.get('m', 0.0)
         
         for row in iterator:
             baseline_key = row.baseline_key
+
+            if baseline_key == "0-1":
+                print("Baseline key: ", baseline_key)
+                print("Field ID: ", row.field_id)
+                print("Spw ID: ", row.spw_id)
+                print("Polarization ID: ", row.polarization_id)
+                print("Time: ", row.time)
+                print("Scan Number: ", row.scan_number)
+                print("Coords: ", row.u, row.v)
+                print("Flag: ", row.flag)
+                print("Weight: ", row.weight)
+                print("Visibilities: ", row.visibilities)
+                print("-" * 40)
 
             time = row.time
             interval = row.interval
@@ -167,19 +195,22 @@ def process_rows(iterator, bda_config):
 
             u, v = row.u, row.v
             Lx, Ly = row.Lx, row.Ly
-            
+
             lambda_ = row.lambda_
-            
+
             # Calculates uv rates
             u_dot, v_dot = calculate_uv_rate(time, Lx, Ly, lambda_, row.dec, row.ra, row.longitude, row.latitude)
 
             if baseline_key not in baseline_stats:
                 baseline_stats[baseline_key] = {'rows_in': 0, 'windows_out': 0, 'decorr_times': []}
             baseline_stats[baseline_key]['rows_in'] += 1
-            
+
+            l_row = l[row.field_id]
+            m_row = m[row.field_id]
+
             # Calculate decorrelation time
-            decorr_time = calculate_decorrelation_time(u_dot, v_dot, decorr_factor, field_offset_deg)
-            
+            decorr_time = calculate_decorrelation_time(u_dot, v_dot, l_row, m_row, decorr_factor)
+
             baseline_stats[baseline_key]['decorr_times'].append(decorr_time)
             
             # Create new window if needed
@@ -214,12 +245,12 @@ def process_rows(iterator, bda_config):
                 yield result
         
         # Print baseline statistics
-        print("=== BDA Baseline Statistics ===")
+        """ print("=== BDA Baseline Statistics ===")
         for bl_key, stats in sorted(baseline_stats.items()):
             avg_decorr = np.mean(stats['decorr_times'])
             print(f"{bl_key}: {stats['rows_in']} rows → {stats['windows_out']} windows "
                   f"(decorr_avg={avg_decorr:.1f}s, compression={100*(1-stats['windows_out']/stats['rows_in']):.1f}%)")
-        print("===========================\n")
+        print("===========================\n") """
 
     except Exception as e:
         print(f"Error processing rows for bda: {e}")
