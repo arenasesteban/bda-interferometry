@@ -173,15 +173,12 @@ def load_simulation_config(config_path: str = None) -> Dict[str, Any]:
     return user_config
 
 
-def update_bda_config(config_path, phase_direction_cosines):
+def update_bda_config(config_path, min_diameter):
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
 
-        direction_cosines = phase_direction_cosines.value
-
-        config['l'] = direction_cosines[0].tolist()
-        config['m'] = direction_cosines[1].tolist()
+        config['min_diameter'] = float(min_diameter)
 
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
@@ -531,6 +528,7 @@ def run_producer_service(antenna_config_path: str,
 
         update_bda_config(
             config_path="./configs/bda_config.json",
+            min_diameter=dataset.antenna.min_diameter.compute().value,
             phase_direction_cosines=dataset.field.phase_direction_cosines
         )
 
