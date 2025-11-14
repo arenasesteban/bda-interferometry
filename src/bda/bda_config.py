@@ -1,14 +1,8 @@
-"""
-BDA Configuration Management
-
-Provides configuration loading and validation functions for baseline-dependent averaging
-parameters. Handles JSON file parsing, default value provision, and fallback mechanisms
-for robust configuration management in streaming interferometry processing.
-"""
-
 import json
 from pathlib import Path
 import traceback
+
+from .bda_core import calculate_amplitude_loss, calculate_loss_exact, calculate_threshold_loss 
 
 
 def load_bda_config(config_path):
@@ -22,12 +16,18 @@ def load_bda_config(config_path):
             config = json.load(f)
         
         # Check presence of required scientific parameters
-        required_fields = ['decorr_factor', 'field_offset_deg']
+        required_fields = ['decorr_limit', 'max_time_window']
         for field in required_fields:
             if field not in config:
                 raise ValueError(f"Missing required field '{field}' in BDA config")
         
-        return validate_bda_config(config)
+        validated  = validate_bda_config(config)
+        updated = update_bda_config(validated)
+
+        with open(config_file, 'w') as f:
+            json.dump(updated, f, indent=4)
+
+        return updated
         
     except Exception as e:
         print(f"Error loading BDA config: {e}")
@@ -38,18 +38,35 @@ def load_bda_config(config_path):
 def validate_bda_config(config):
     try:
         validated = config.copy()
-        
-        # Validate decorrelation factor (0 < R ≤ 1)
-        if not (0.0 < validated['decorr_factor'] <= 1.0):
-            raise ValueError(f"decorr_factor must be in (0,1], got {validated['decorr_factor']}")
-        
-        # Validate field offset in degrees (0 < θ ≤ 90)
-        if not (0.0 < validated['field_offset_deg'] <= 90.0):
-            raise ValueError(f"field_offset_deg must be in (0,90], got {validated['field_offset_deg']}")
+
+        # Validate decorrelation limit (0 < δ ≤ 1)
+        if not (0.0 < validated['decorr_limit'] <= 1.0):
+            raise ValueError(f"decorr_limit must be in (0,1], got {validated['decorr_limit']}")
+
+        # Validate max time window (0 < τ ≤ 3600)
+        if not (0.0 < validated['max_time_window'] <= 3600.0):
+            raise ValueError(f"max_time_window must be in (0,3600], got {validated['max_time_window']}")
 
         return validated
 
     except Exception as e:
         print(f"Error validating BDA config: {e}")
+        traceback.print_exc()
+        raise
+
+
+def update_bda_config(config):
+    try:
+        x_exact = calculate_loss_exact(config['decorr_limit'])
+        x_adjusted = calculate_threshold_loss(x_exact)
+        x = calculate_amplitude_loss(x_adjusted)
+
+        updated = config.copy()
+        updated['x'] = x
+
+        return updated
+
+    except Exception as e:
+        print(f"Error updating BDA config: {e}")
         traceback.print_exc()
         raise
