@@ -1,16 +1,16 @@
 import numpy as np
 import traceback
 
-from .bda_core import calculate_decorrelation_time, calculate_uv_rate, average_visibilities, average_uv
+from .bda_core import calculate_phase_rate, calculate_uv_rate, average_visibilities, average_uv
 
 
-def create_window(row, start_time, decorr_time):
+def create_window(row, start_time):
     try:
         return {
             'start_time': start_time,
-            'end_time': start_time + decorr_time,
-            'decorr_time': decorr_time,
             'nrows': 0,
+            'x_acc': 0.0,
+            'phi_dot': [],
             'subms_id': row.subms_id,
             'field_id': row.field_id,
             'spw_id': row.spw_id,
@@ -38,9 +38,12 @@ def create_window(row, start_time, decorr_time):
         raise
 
 
-def add_window(window, interval, exposure, time, u, v, visibilities, weight, flag):
+def add_window(window, phi_dot, interval, exposure, time, u, v, visibilities, weight, flag):
     try:
         window['nrows'] += 1
+        window['x_acc'] += 0.5 * abs(phi_dot) * exposure
+        window['phi_dot'].append(phi_dot)
+        
         window['interval'].append(interval)
         window['exposure'].append(exposure)
         window['time'].append(time)
@@ -87,21 +90,19 @@ def calculate_window_duration(times, intervals):
         raise
 
 
-def should_close_window(window, current_time, current_interval):
+def should_close_window(window, phi_dot, x, exposure, baseline_key):
     try:
         if window['nrows'] == 0:
             return False
 
-        times = window['time'] + [current_time]
-        intervals = window['interval'] + [current_interval]
+        x_acc = window['x_acc']
+        x_inc = 0.5 * abs(phi_dot) * exposure
 
-        if window['decorr_time'] == float('inf'):
-            return False
-        
-        duration = calculate_window_duration(times, intervals)
+        if baseline_key == "0-1":
+            print(f"[BDA] x_acc: {x_acc}, x_inc: {x_inc}, x: {x}")
+            print(f"[BDA] Should close window? {(x_acc + x_inc) > x}\n")
 
-        # Criterion: Maximum decorrelation time exceeded
-        return duration > window['decorr_time']
+        return (x_acc + x_inc) > x
 
     except Exception as e:
         print(f"Error checking if window should close: {e}")
@@ -116,28 +117,27 @@ def complete_window(window, baseline_key):
 
         visibilities, weights, flags = window['visibilities'], window['weight'], window['flag']
         avg_vis, avg_weight, flag_avg = average_visibilities(visibilities, weights, flags)
-        u_avg, v_avg = average_uv(window['u'], window['v'])
+        u_avg, v_avg = average_uv(window['u'], window['v'], window['exposure'])
 
-        interval_avg = float(calculate_window_duration(window['time'], window['interval']))
-        exposures = np.array(window['exposure'])
-        exposure_avg = float(exposures.sum())
+        intervals, exposures = np.array(window['interval']), np.array(window['exposure'])
+        interval_avg, exposure_avg = float(np.sum(intervals)) , float(np.sum(exposures))
 
         if baseline_key == "0-1":
-            print("BDA Window Completed:")
-            print("Baseline key: ", baseline_key)
-            print("Coords: ", u_avg, v_avg)
-            print("Flag: ", flag_avg)
-            print("Weight: ", avg_weight)
-            print("Visibilities: ", avg_vis)
-            print("-" * 40)
+            print("[BDA] Baseline 0-1")
+            print(f"nrows: {window['nrows']}")
+            print(f"x_acc: {window['x_acc']}")
+            print(f"time: {window['start_time']}")
+            print(f"interval: {interval_avg}")
+            print(f"exposure: {exposure_avg}")
+            print(f"coords: ({u_avg}, {v_avg})")
+            print(f"weight: {avg_weight}")
+            print(f"flags: {flag_avg}")
+            print(f"visibilities: {avg_vis}\n")
+            print("-" * 60 + "\n")
 
         # Return completed window with averaged values
         return {
-            'nrows': window['nrows'],
-            'time_start': window['start_time'],
-            'time_end': window['end_time'],
-            'decorr_time': window['decorr_time'],
-            
+            'nrows': window['nrows'],            
             'subms_id': window['subms_id'],
             'field_id': window['field_id'],
             'spw_id': window['spw_id'],
@@ -169,83 +169,82 @@ def process_rows(iterator, bda_config):
     baseline_stats = {}  # baseline_key -> stats dict
     
     try:
-        decorr_factor = bda_config.get('decorr_factor', 0.95)
-        l = bda_config.get('l', 0.0)
-        m = bda_config.get('m', 0.0)
-        
+        x = bda_config.get('x', 0.0)
+        min_diameter = bda_config.get('min_diameter', 0.0)
+
         for row in iterator:
             baseline_key = row.baseline_key
+            scan_number = row.scan_number
 
-            if baseline_key == "0-1":
-                print("Baseline key: ", baseline_key)
-                print("Field ID: ", row.field_id)
-                print("Spw ID: ", row.spw_id)
-                print("Polarization ID: ", row.polarization_id)
-                print("Time: ", row.time)
-                print("Scan Number: ", row.scan_number)
-                print("Coords: ", row.u, row.v)
-                print("Flag: ", row.flag)
-                print("Weight: ", row.weight)
-                print("Visibilities: ", row.visibilities)
-                print("-" * 40)
-
+            Lx, Ly = row.Lx, row.Ly
+            lambda_ = row.lambda_
             time = row.time
             interval = row.interval
             exposure = row.exposure
 
             u, v = row.u, row.v
-            Lx, Ly = row.Lx, row.Ly
+            visibilities, weight, flag = row.visibilities, row.weight, row.flag
 
-            lambda_ = row.lambda_
-
-            # Calculates uv rates
-            u_dot, v_dot = calculate_uv_rate(time, Lx, Ly, lambda_, row.dec, row.ra, row.longitude, row.latitude)
+            if baseline_key == "0-1":
+                print("[-] Baseline 0-1")
+                print(f"time: {time}")
+                print(f"interval: {interval}")
+                print(f"exposure: {exposure}")
+                print(f"coords: ({u}, {v})")
+                print(f"weight: {weight}")
+                print(f"flags: {flag}")
+                print(f"visibilities: {visibilities}\n")
+                print("-" * 60 + "\n")
 
             if baseline_key not in baseline_stats:
                 baseline_stats[baseline_key] = {'rows_in': 0, 'windows_out': 0, 'decorr_times': []}
             baseline_stats[baseline_key]['rows_in'] += 1
 
-            l_row = l[row.field_id]
-            m_row = m[row.field_id]
+            # Calculates uv rates
+            u_dot, v_dot = calculate_uv_rate(time, Lx, Ly, lambda_, row.dec, row.ra, row.longitude, row.latitude)
 
-            # Calculate decorrelation time
-            decorr_time = calculate_decorrelation_time(u_dot, v_dot, l_row, m_row, decorr_factor)
+            # Calculate phase rate
+            phi_dot = calculate_phase_rate(u_dot, v_dot, lambda_, min_diameter)
 
-            baseline_stats[baseline_key]['decorr_times'].append(decorr_time)
-            
+            if baseline_key == "0-1":
+                print(f"[BDA] phi_dot: {phi_dot}")
+
             # Create new window if needed
             if baseline_key not in active_windows:
-                active_windows[baseline_key] = create_window(row, time, decorr_time)
+                active_windows[baseline_key] = {}
+            
+            if scan_number not in active_windows[baseline_key]:
+                active_windows[baseline_key][scan_number] = create_window(row, time)
             else:
-                window = active_windows[baseline_key]
+                window = active_windows[baseline_key][scan_number]
 
                 # Check if existing window should be closed
-                if should_close_window(window, time, interval):
+                if should_close_window(window, phi_dot, x, exposure, baseline_key):
                     result = complete_window(window, baseline_key)
                     baseline_stats[baseline_key]['windows_out'] += 1
                     yield result
 
                     #Remove completed window
-                    del active_windows[baseline_key]
+                    del active_windows[baseline_key][scan_number]
 
                     # Create new window for current row
-                    active_windows[baseline_key] = create_window(row, time, decorr_time)
+                    active_windows[baseline_key][scan_number] = create_window(row, time)
 
-            window = active_windows[baseline_key]
-            visibilities, weight, flag = row.visibilities, row.weight, row.flag
+            window = active_windows[baseline_key][scan_number]  
 
             # Add sample to active window
-            add_window(window, interval, exposure, time, u, v, visibilities, weight, flag)
+            add_window(window, phi_dot, interval, exposure, time, u, v, visibilities, weight, flag)
 
         # Flush remaining windows at end of partition
-        for baseline_key, window in active_windows.items():
-            if window['nrows'] > 0:
-                result = complete_window(window, baseline_key)
-                baseline_stats[baseline_key]['windows_out'] += 1
-                yield result
+        for baseline_key, windows in active_windows.items():
+            for scan_number, window in windows.items():
+                if window['nrows'] > 0:
+                    result = complete_window(window, baseline_key)
+                    baseline_stats[baseline_key]['windows_out'] += 1
+                    yield result
         
-        # Print baseline statistics
-        """ print("=== BDA Baseline Statistics ===")
+        """ # Print baseline statistics
+        print("=== BDA Baseline Statistics ===")
         for bl_key, stats in sorted(baseline_stats.items()):
             avg_decorr = np.mean(stats['decorr_times'])
             print(f"{bl_key}: {stats['rows_in']} rows → {stats['windows_out']} windows "
