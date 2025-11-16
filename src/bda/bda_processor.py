@@ -1,255 +1,248 @@
 import numpy as np
 import traceback
 
-from .bda_core import calculate_phase_rate, calculate_uv_rate, average_visibilities, average_uv
+from pyspark.sql.types import StructType, StructField, DoubleType, ArrayType, IntegerType
+from pyspark.sql.functions import pandas_udf, PandasUDFType
+
+from .bda_core import calculate_numerical_derivates, calculate_phase_rate
 
 
-def create_window(row, start_time):
-    try:
-        return {
-            'start_time': start_time,
-            'nrows': 0,
-            'x_acc': 0.0,
-            'phi_dot': [],
-            'subms_id': row.subms_id,
-            'field_id': row.field_id,
-            'spw_id': row.spw_id,
-            'polarization_id': row.polarization_id,
-            'n_channels': row.n_channels,
-            'n_correlations': row.n_correlations,
-            'antenna1': row.antenna1,
-            'antenna2': row.antenna2,
-            'scan_number': row.scan_number,
-            'longitude': row.longitude,
-            'interval': [],
-            'exposure': [],
-            'time': [],
-            'u': [],
-            'v': [],
-            'w': [],
-            'visibilities': [],
-            'weight': [],
-            'flag': []
-        }
-    
-    except Exception as e:
-        print(f"Error creating window: {e}")
-        traceback.print_exc()
-        raise
+def assign_temporal_window(df, x):
+    """
+    Assign temporal windows based on accumulated x value.
 
+    Parameters
+    ----------
+    df : pyspark.sql.DataFrame
+        Input DataFrame with necessary columns.
+    x : float
+        Threshold x value for window assignment.
 
-def add_window(window, phi_dot, interval, exposure, time, u, v, visibilities, weight, flag):
-    try:
-        window['nrows'] += 1
-        window['x_acc'] += 0.5 * abs(phi_dot) * exposure
-        window['phi_dot'].append(phi_dot)
-        
-        window['interval'].append(interval)
-        window['exposure'].append(exposure)
-        window['time'].append(time)
-        window['u'].append(u)
-        window['v'].append(v)
+    Returns
+    -------
+    pyspark.sql.DataFrame
+        DataFrame with assigned window IDs and accumulated x values.
+    """
+    try:    
+        schema = StructType(df.schema.fields + [
+            StructField('window_id', DoubleType(), True),
+            StructField('x_accumulated', DoubleType(), True)
+        ])
 
-        vs = np.array(visibilities, dtype=np.float64)
-        ws = np.array(weight, dtype=np.float64)
-        fs = np.array(flag, dtype=np.bool_)
+        @pandas_udf(schema, PandasUDFType.GROUPED_MAP)
+        def assign_windows(pdf):
+            pdf = pdf.sort_values(by='time').reset_index(drop=True)
 
-        window['visibilities'].append(vs)
-        window['weight'].append(ws)
-        window['flag'].append(fs)
+            n = len(pdf)
+            window_ids = np.zeros(n, dtype=np.float64)
+            x_accumulated = np.zeros(n, dtype=np.float64)
 
-        return window
+            current_window = 0
+            x_acc = 0.0
 
-    except Exception as e:
-        print(f"Error adding sample to window: {e}")
-        traceback.print_exc()
-        raise
+            for i in range(n):
+                # Calculate effective integration time
+                dt_eff = pdf.loc[i, 'exposure'] if pdf.loc[i, 'exposure'] > 0 else pdf.loc[i, 'interval']
 
+                if dt_eff <= 0:
+                    dt_eff = 0.0
 
-def calculate_window_duration(times, intervals):
-    try:
-        if len(times) == 0:
-            return 0.0
-        
-        if len(times) == 1:
-            return intervals[0]
+                phi_dot = pdf.loc[i, 'phi_dot']
+                x_inc = abs(phi_dot) * dt_eff / 2.0
 
-        MJD_TO_SECONDS = 86400.0
+                # Check if should close current window
+                if (x_acc + x_inc) > x: 
+                    current_window += 1
+                    x_acc = x_inc # Reset accumulated x for new window
+                else: 
+                    x_acc += x_inc # Continue accumulating in current window
 
-        times_sec = np.array(times) * MJD_TO_SECONDS
-        intervals_sec = np.array(intervals)
-
-        t_start = times_sec[0] - (intervals_sec[0] / 2.0)
-        t_end = times_sec[-1] + (intervals_sec[-1] / 2.0)
-
-        return t_end - t_start
-
-    except Exception as e:
-        print(f"Error calculating window duration: {e}")
-        traceback.print_exc()
-        raise
-
-
-def should_close_window(window, phi_dot, x, exposure, baseline_key):
-    try:
-        if window['nrows'] == 0:
-            return False
-
-        x_acc = window['x_acc']
-        x_inc = 0.5 * abs(phi_dot) * exposure
-
-        if baseline_key == "0-1":
-            print(f"[BDA] x_acc: {x_acc}, x_inc: {x_inc}, x: {x}")
-            print(f"[BDA] Should close window? {(x_acc + x_inc) > x}\n")
-
-        return (x_acc + x_inc) > x
-
-    except Exception as e:
-        print(f"Error checking if window should close: {e}")
-        traceback.print_exc()
-        raise
-
-
-def complete_window(window, baseline_key):
-    try:
-        if window['nrows'] == 0:
-            return None
-
-        visibilities, weights, flags = window['visibilities'], window['weight'], window['flag']
-        avg_vis, avg_weight, flag_avg = average_visibilities(visibilities, weights, flags)
-        u_avg, v_avg = average_uv(window['u'], window['v'], window['exposure'])
-
-        intervals, exposures = np.array(window['interval']), np.array(window['exposure'])
-        interval_avg, exposure_avg = float(np.sum(intervals)) , float(np.sum(exposures))
-
-        if baseline_key == "0-1":
-            print("[BDA] Baseline 0-1")
-            print(f"nrows: {window['nrows']}")
-            print(f"x_acc: {window['x_acc']}")
-            print(f"time: {window['start_time']}")
-            print(f"interval: {interval_avg}")
-            print(f"exposure: {exposure_avg}")
-            print(f"coords: ({u_avg}, {v_avg})")
-            print(f"weight: {avg_weight}")
-            print(f"flags: {flag_avg}")
-            print(f"visibilities: {avg_vis}\n")
-            print("-" * 60 + "\n")
-
-        # Return completed window with averaged values
-        return {
-            'nrows': window['nrows'],            
-            'subms_id': window['subms_id'],
-            'field_id': window['field_id'],
-            'spw_id': window['spw_id'],
-            'polarization_id': window['polarization_id'],
-            'n_channels': window['n_channels'],
-            'n_correlations': window['n_correlations'],
-            'antenna1': window['antenna1'],
-            'antenna2': window['antenna2'],
-            'scan_number': window['scan_number'],
-            'baseline_key': baseline_key,
-            'interval': interval_avg,
-            'exposure': exposure_avg,
-            'time': window['start_time'],
-            'u': u_avg,
-            'v': v_avg,
-            'visibilities': avg_vis,
-            'weight': avg_weight,
-            'flag': flag_avg
-        }
-    
-    except Exception as e:
-        print(f"Error completing window: {e}")
-        traceback.print_exc()
-        raise
-
-
-def process_rows(iterator, bda_config):
-    active_windows = {}  # baseline_key -> window
-    baseline_stats = {}  # baseline_key -> stats dict
-    
-    try:
-        x = bda_config.get('x', 0.0)
-        min_diameter = bda_config.get('min_diameter', 0.0)
-
-        for row in iterator:
-            baseline_key = row.baseline_key
-            scan_number = row.scan_number
-
-            Lx, Ly = row.Lx, row.Ly
-            lambda_ = row.lambda_
-            time = row.time
-            interval = row.interval
-            exposure = row.exposure
-
-            u, v = row.u, row.v
-            visibilities, weight, flag = row.visibilities, row.weight, row.flag
-
-            if baseline_key == "0-1":
-                print("[-] Baseline 0-1")
-                print(f"time: {time}")
-                print(f"interval: {interval}")
-                print(f"exposure: {exposure}")
-                print(f"coords: ({u}, {v})")
-                print(f"weight: {weight}")
-                print(f"flags: {flag}")
-                print(f"visibilities: {visibilities}\n")
-                print("-" * 60 + "\n")
-
-            if baseline_key not in baseline_stats:
-                baseline_stats[baseline_key] = {'rows_in': 0, 'windows_out': 0, 'decorr_times': []}
-            baseline_stats[baseline_key]['rows_in'] += 1
-
-            # Calculates uv rates
-            u_dot, v_dot = calculate_uv_rate(time, Lx, Ly, lambda_, row.dec, row.ra, row.longitude, row.latitude)
-
-            # Calculate phase rate
-            phi_dot = calculate_phase_rate(u_dot, v_dot, lambda_, min_diameter)
-
-            if baseline_key == "0-1":
-                print(f"[BDA] phi_dot: {phi_dot}")
-
-            # Create new window if needed
-            if baseline_key not in active_windows:
-                active_windows[baseline_key] = {}
+                window_ids[i] = current_window
+                x_accumulated[i] = x_acc
             
-            if scan_number not in active_windows[baseline_key]:
-                active_windows[baseline_key][scan_number] = create_window(row, time)
-            else:
-                window = active_windows[baseline_key][scan_number]
+            pdf['window_id'] = window_ids
+            pdf['x_accumulated'] = x_accumulated
 
-                # Check if existing window should be closed
-                if should_close_window(window, phi_dot, x, exposure, baseline_key):
-                    result = complete_window(window, baseline_key)
-                    baseline_stats[baseline_key]['windows_out'] += 1
-                    yield result
+            return pdf
 
-                    #Remove completed window
-                    del active_windows[baseline_key][scan_number]
+        df_windowed = df.groupBy('baseline_key','scan_number').apply(assign_windows)
 
-                    # Create new window for current row
-                    active_windows[baseline_key][scan_number] = create_window(row, time)
+        return df_windowed
 
-            window = active_windows[baseline_key][scan_number]  
+    except Exception as e:
+        print(f"Error assigning temporal window: {e}")
+        traceback.print_exc()
+        raise
 
-            # Add sample to active window
-            add_window(window, phi_dot, interval, exposure, time, u, v, visibilities, weight, flag)
 
-        # Flush remaining windows at end of partition
-        for baseline_key, windows in active_windows.items():
-            for scan_number, window in windows.items():
-                if window['nrows'] > 0:
-                    result = complete_window(window, baseline_key)
-                    baseline_stats[baseline_key]['windows_out'] += 1
-                    yield result
-        
-        """ # Print baseline statistics
-        print("=== BDA Baseline Statistics ===")
-        for bl_key, stats in sorted(baseline_stats.items()):
-            avg_decorr = np.mean(stats['decorr_times'])
-            print(f"{bl_key}: {stats['rows_in']} rows → {stats['windows_out']} windows "
-                  f"(decorr_avg={avg_decorr:.1f}s, compression={100*(1-stats['windows_out']/stats['rows_in']):.1f}%)")
-        print("===========================\n") """
+def average_by_window(df):
+    """
+    Average the DataFrame by window ID.
+
+    Parameters
+    ----------
+    df : pyspark.sql.DataFrame
+        Input DataFrame with necessary columns.
+
+    Returns
+    -------
+    pyspark.sql.DataFrame
+        DataFrame with averaged values by window ID.
+    """
+    try:
+        schema =  StructType([
+            StructField('subms_id', DoubleType(), True),
+            StructField('field_id', DoubleType(), True),
+            StructField('spw_id', DoubleType(), True),
+            StructField('polarization_id', DoubleType(), True),
+            StructField('n_channels', DoubleType(), True),
+            StructField('n_correlations', DoubleType(), True),
+            StructField('antenna1', DoubleType(), True),
+            StructField('antenna2', DoubleType(), True),
+            StructField('baseline_key', DoubleType(), True),
+            StructField('scan_number', DoubleType(), True),
+            StructField('window_id', DoubleType(), True),
+            StructField('time', DoubleType(), True),
+            StructField('interval', DoubleType(), True),
+            StructField('exposure', DoubleType(), True),
+            StructField('u', DoubleType(), True),
+            StructField('v', DoubleType(), True),
+            StructField('visibilities', ArrayType(ArrayType(ArrayType(DoubleType()))), True),
+            StructField('weight', ArrayType(DoubleType()), True),
+            StructField('flag', ArrayType(ArrayType(IntegerType())), True)
+        ])
+
+        @pandas_udf(schema, PandasUDFType.GROUPED_MAP)
+        def average_visibilities(pdf):
+            try:
+                bda_avg = {
+                    'subms_id': pdf['subms_id'].iloc[0],
+                    'field_id': pdf['field_id'].iloc[0],
+                    'spw_id': pdf['spw_id'].iloc[0],
+                    'polarization_id': pdf['polarization_id'].iloc[0],
+                    'n_channels': pdf['n_channels'].iloc[0],
+                    'n_correlations': pdf['n_correlations'].iloc[0],
+                    'antenna1': pdf['antenna1'].iloc[0],
+                    'antenna2': pdf['antenna2'].iloc[0],
+                    'baseline_key': pdf['baseline_key'].iloc[0],
+                    'scan_number': pdf['scan_number'].iloc[0],
+                    'window_id': pdf['window_id'].iloc[0],
+                    'time': pdf['time'].iloc[0],
+                    'interval': pdf['interval'].sum(),
+                    'exposure': pdf['exposure'].sum(),
+                }
+
+                bda_avg['u'] = (pdf['u'] * pdf['exposure']).sum() / bda_avg['exposure']
+                bda_avg['v'] = (pdf['v'] * pdf['exposure']).sum() / bda_avg['exposure']
+
+                n = len(pdf)
+                vs_list, ws_list, fs_list = [], [], []
+
+                for i in range(n):
+                    vs_data = pdf.iloc[i]['visibilities']
+                    ws_data = pdf.loc[i, 'weight']
+                    fs_data = pdf.loc[i, 'flag']
+
+                    visibilities = np.array([[corr for corr in chan] for chan in vs_data], dtype=np.float64)
+                    weights = np.array([w for w in ws_data], dtype=np.float64)
+                    flags = np.array([[f for f in chan] for chan in fs_data], dtype=np.bool_)
+
+                    """ if bda_avg['baseline_key'] == "0-1":
+                        print(f"[DEBUG][VISIBILITIES SHAPE]: {visibilities.shape}")
+                        print(f"[DEBUG][VISIBILITIES]: {visibilities}")
+
+                        print(f"[DEBUG][WEIGHTS SHAPE]: {weights.shape}")
+                        print(f"[DEBUG][WEIGHTS]: {weights}")
+
+                        print(f"[DEBUG][FLAGS SHAPE]: {flags.shape}")
+                        print(f"[DEBUG][FLAGS]: {flags}") """
+
+                    vs_list.append(visibilities)
+                    ws_list.append(weights)
+                    fs_list.append(flags)
+                
+                vs = np.stack(vs_list, axis=0)
+                ws = np.stack(ws_list, axis=0)
+                fs = np.stack(fs_list, axis=0)
+
+                N, C, P, _ = vs.shape
+                valid_mask = ~fs.astype(bool)
+
+                ws_broadcast = ws[:, None, :]
+                ws_broadcast = np.broadcast_to(ws_broadcast, (N, C, P))
+                ws_valid = np.where(valid_mask, ws_broadcast, 0.0)
+                ws_sum = np.sum(ws_valid, axis=0)
+
+                vs_real = (vs[..., 0] * ws_valid).sum(axis=0)
+                vs_imag = (vs[..., 1] * ws_valid).sum(axis=0)
+
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    vs_avg_real = np.where(ws_sum > 0, vs_real / ws_sum, 0.0)
+                    vs_avg_imag = np.where(ws_sum > 0, vs_imag / ws_sum, 0.0)
+                
+                valid_count = (ws_valid > 0).sum(axis=0)
+
+                vs_avg = np.stack([vs_avg_real, vs_avg_imag], axis=-1)
+                ws_avg = np.where(valid_count > 0, ws_sum / valid_count, 0.0).mean()
+                fs_avg = (ws_sum == 0).astype(np.int32)
+
+                bda_avg['visibilities'] = vs_avg.tolist()
+                bda_avg['weight'] = ws_avg.tolist()
+                bda_avg['flag'] = fs_avg.tolist()
+
+                return bda_avg
+
+            except Exception as e:
+                print(f"Error averaging visibilities: {e}")
+                traceback.print_exc()
+                raise
+
+        # Apply average to each group
+        df_avg = df.groupBy('baseline_key', 'scan_number', 'window_id').apply(average_visibilities)
+
+        return df_avg
+
+    except Exception as e:
+        print(f"Error averaging by window: {e}")
+        traceback.print_exc()
+        raise
+
+
+def process_rows(df, bda_config):
+    """
+    Process rows for baseline-dependent averaging (BDA).
+
+    Parameters
+    ----------
+    df : pyspark.sql.DataFrame
+        Input DataFrame with necessary columns.
+    bda_config : dict
+        Configuration dictionary with BDA parameters.
+    
+    Returns
+    -------
+    pyspark.sql.DataFrame
+        Processed DataFrame after applying BDA.
+    """
+    try:
+        fov = bda_config.get('fov', 1.0)
+        x = bda_config.get('x', 0.0)
+
+        print(f"[DEBUG] Initial df count: {df.count()}")
+        df = calculate_numerical_derivates(df)
+
+        print(f"[DEBUG] df count after derivates: {df.count()}")
+        df = calculate_phase_rate(df, fov)
+
+        print(f"[DEBUG] df count after phase rate: {df.count()}")
+        df_windowed = assign_temporal_window(df, x)
+
+        print(f"[DEBUG] df count after window assignment: {df_windowed.count()}")
+        df_avg = average_by_window(df_windowed)
+
+        print(f"[DEBUG] df count after averaging: {df_avg.count()}")
+
+        return df_avg
 
     except Exception as e:
         print(f"Error processing rows for bda: {e}")

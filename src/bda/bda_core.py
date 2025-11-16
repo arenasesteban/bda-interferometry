@@ -1,8 +1,8 @@
 import numpy as np
 import traceback
-import astropy.units as units
-from astropy.time import Time
-from astropy.coordinates import EarthLocation
+
+from pyspark.sql.functions import lit, sqrt, col, lag, lead, row_number, count, when
+from pyspark.sql.window import Window
 
 
 def calculate_amplitude_loss(x):
@@ -65,91 +65,117 @@ def calculate_threshold_loss(x_exact):
         raise
 
 
-def calculate_phase_rate(u_dot, v_dot, lambda_, min_diameter):
+def calculate_numerical_derivates(df):
+    """
+    Calculate numerical derivatives for the input DataFrame.
+
+    Parameters
+    ----------
+    df : pyspark.sql.DataFrame
+        Input DataFrame with necessary columns.
+
+    Returns
+    -------
+    pyspark.sql.DataFrame
+        DataFrame with calculated numerical derivatives.
+    """
+    MJD_TO_SECONDS = 86400.0
+
     try:
-        fov = 1.02 * (lambda_ / min_diameter)
-        phi_dot = (2.0 * np.pi) * (np.sqrt(u_dot ** 2 + v_dot ** 2) * fov)
+        w = Window.partitionBy('baseline_key', 'scan_number').orderBy('time')
 
-        return phi_dot
+        # Prepare first lag/lead columns
+        df = df \
+            .withColumn('u_prev', lag('u', 1).over(w)) \
+            .withColumn('u_next', lead('u', 1).over(w)) \
+            .withColumn('v_prev', lag('v', 1).over(w)) \
+            .withColumn('v_next', lead('v', 1).over(w)) \
+            .withColumn('time_prev', lag('time', 1).over(w)) \
+            .withColumn('time_next', lead('time', 1).over(w)
+        )
 
-    except Exception as e:
-        print(f"Error calculating phase velocity: {e}")
-        traceback.print_exc()
-        raise
-
-
-def calculate_uv_rate(time, Lx, Ly, dec, ra, lambda_, longitude, latitude):
-    try:
-        angular_velocity_earth = 7.2921150e-5
-
-        time_utc = Time(time, format='mjd', scale='utc')
-        location = EarthLocation(lon=longitude * units.deg, lat=latitude * units.deg)
-        lst = time_utc.sidereal_time('apparent', longitude=location.lon)
-
-        lst_rad = lst.to(units.rad).value
-        HA = lst_rad - ra
-
-        u_dot = ((Lx * np.cos(HA)) - (Ly * np.sin(HA))) * angular_velocity_earth / lambda_
-        v_dot = ((Lx * np.sin(dec) * np.sin(HA)) + (Ly * np.sin(dec) * np.cos(HA))) * angular_velocity_earth / lambda_
-
-        return float(u_dot), float(v_dot)
-
-    except Exception as e:
-        print(f"Error calculating uv rates: {e}")
-        traceback.print_exc()
-        raise
-
-
-def average_visibilities(visibilities, weights, flags):
-    try:
-        vs = np.stack(visibilities, axis=0)  # Shape: (N, C, P, 2)
-        ws = np.stack(weights, axis=0)       # Shape: (N, P)
-        fs = np.stack(flags, axis=0)         # Shape: (N, C, P)
-
-        N, C, P, _ = vs.shape
-        valid_mask = ~fs.astype(bool)
-
-        ws_broadcast = ws[:, None, :]
-        ws_broadcast = np.broadcast_to(ws_broadcast, (N, C, P))
-        ws_valid = np.where(valid_mask, ws_broadcast, 0.0)
-        ws_sum = ws_valid.sum(axis=0)
-
-        vs_real = (vs[..., 0] * ws_valid).sum(axis=0)
-        vs_imag = (vs[..., 1] * ws_valid).sum(axis=0)
+        # Prepare second lag/lead columns
+        df = df \
+            .withColumn('u_prev_2', lag('u', 2).over(w)) \
+            .withColumn('u_next_2', lead('u', 2).over(w)) \
+            .withColumn('v_prev_2', lag('v', 2).over(w)) \
+            .withColumn('v_next_2', lead('v', 2).over(w)) \
+            .withColumn('time_prev_2', lag('time', 2).over(w)) \
+            .withColumn('time_next_2', lead('time', 2).over(w)
+        )
         
-        with np.errstate(divide='ignore', invalid='ignore'):
-            real_avg = np.where(ws_sum > 0, vs_real / ws_sum, 0.0)
-            imag_avg = np.where(ws_sum > 0, vs_imag / ws_sum, 0.0)
+        # Add row number and total rows for boundary conditions
+        df = df \
+            .withColumn('row_num', row_number().over(w)) \
+            .withColumn('total_rows', count('*').over(w)
+        )
+
+        # Centered difference
+        centered_du = (col('u_next') - col('u_prev')) / ((col('time_next') - col('time_prev')) * lit(MJD_TO_SECONDS))
+        centered_dv = (col('v_next') - col('v_prev')) / ((col('time_next') - col('time_prev')) * lit(MJD_TO_SECONDS))
+
+        # Forward difference
+        left_du = (-3.0 * col('u') + 4.0 * col('u_next') - col('u_next_2')) / ((col('time_next_2') - col('time')) * lit(MJD_TO_SECONDS))
+        left_dv = (-3.0 * col('v') + 4.0 * col('v_next') - col('v_next_2')) / ((col('time_next_2') - col('time')) * lit(MJD_TO_SECONDS))
+
+        # Backward difference
+        right_du = (3.0 * col('u') - 4.0 * col('u_prev') + col('u_prev_2')) / ((col('time') - col('time_prev_2')) * lit(MJD_TO_SECONDS))
+        right_dv = (3.0 * col('v') - 4.0 * col('v_prev') + col('v_prev_2')) / ((col('time') - col('time_prev_2')) * lit(MJD_TO_SECONDS))
+
+        # Assign derivatives based on row position
+        # First row uses forward difference, last row uses backward difference, others use centered difference
+        df = df.withColumn('du_dt',
+            when((col('row_num') == 1), left_du)
+            .when((col('row_num') == col('total_rows')), right_du)
+            .otherwise(centered_du)
+        )
         
-        valid_count = (ws_valid > 0).sum(axis=0)
+        df = df.withColumn('dv_dt',
+            when((col('row_num') == 1), left_dv)
+            .when((col('row_num') == col('total_rows')), right_dv)
+            .otherwise(centered_dv)
+        )
 
-        vs_avg = np.stack([real_avg, imag_avg], axis=-1)
-        ws_avg = np.where(valid_count > 0, ws_sum / valid_count, 0.0).mean(axis=0)
-        fs_avg = (ws_sum == 0).astype(np.int32)
+        drop_cols = [
+            'u_prev', 'u_next', 'v_prev', 'v_next', 'time_prev', 'time_next',
+            'u_prev_2', 'u_next_2', 'v_prev_2', 'v_next_2', 'time_prev_2', 'time_next_2',
+            'row_num', 'total_rows'
+        ]
 
-        return vs_avg.tolist(), ws_avg.tolist(), fs_avg.tolist()
+        df = df.drop(*drop_cols)
+
+        return df
 
     except Exception as e:
-        print(f"Error averaging visibilities: {e}")
+        print(f"Error calculating numerical derivatives: {e}")
         traceback.print_exc()
         raise
 
 
-def average_uv(u, v, exposure):
+def calculate_phase_rate(df, fov):
+    """
+    Calculate phase rate for the input DataFrame.
+    
+    Parameters
+    ----------
+    df : pyspark.sql.DataFrame
+        Input DataFrame with necessary columns.
+    fov : float
+        Field of view parameter.
+    
+    Returns
+    -------
+    pyspark.sql.DataFrame
+        DataFrame with calculated phase rate.
+    """
     try:
-        us = np.array(u, dtype=np.float64)
-        vs = np.array(v, dtype=np.float64)
+        df = df.withColumn('phi_dot',
+            lit(2.0 * np.pi) * sqrt(col('du_dt') ** 2 + col('dv_dt') ** 2) * lit(fov)
+        )
 
-        if exposure is None:
-            u_avg = np.mean(us)
-            v_avg = np.mean(vs)
-        else:
-            u_avg = np.sum(us * exposure) / np.sum(exposure)
-            v_avg = np.sum(vs * exposure) / np.sum(exposure)
-
-        return float(u_avg), float(v_avg)
+        return df
 
     except Exception as e:
-        print(f"Error averaging fields: {e}")
+        print(f"Error calculating phase rate: {e}")
         traceback.print_exc()
         raise

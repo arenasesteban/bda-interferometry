@@ -57,9 +57,9 @@ def validate_bda_config(config):
 
 def update_bda_config(config):
     try:
-        x_exact = calculate_loss_exact(config['decorr_limit'])
-        x_adjusted = calculate_threshold_loss(x_exact)
-        x = calculate_amplitude_loss(x_adjusted)
+        decorr_limit = config['decorr_limit']
+        x_exact = calculate_loss_exact(decorr_limit)
+        x = calculate_threshold_loss(x_exact)
 
         updated = config.copy()
         updated['x'] = x
