@@ -48,13 +48,6 @@ def define_visibility_schema():
         StructField("scan_number", IntegerType(), True),
         StructField("baseline_key", StringType(), True),
 
-        StructField("longitude", DoubleType(), True),
-        StructField("latitude", DoubleType(), True),
-
-        StructField("lambda_", DoubleType(), True),
-        StructField("ra", DoubleType(), True),
-        StructField("dec", DoubleType(), True),
-
         StructField("exposure", DoubleType(), True),
         StructField("interval", DoubleType(), True),
         StructField("time", DoubleType(), True),
@@ -62,8 +55,6 @@ def define_visibility_schema():
         StructField("u", DoubleType(), True),
         StructField("v", DoubleType(), True),
         StructField("w", DoubleType(), True),
-        StructField("Lx", DoubleType(), True),
-        StructField("Ly", DoubleType(), True),
 
         # visibilities: [chan][corr] con [real, imag] -> Array de Array de Array de Double
         StructField("visibilities", ArrayType(ArrayType(ArrayType(DoubleType()))), True),
@@ -167,13 +158,6 @@ def process_chunk(chunk):
         n_channels = int(chunk.get('n_channels', 0))
         n_correlations = int(chunk.get('n_correlations', 0))
 
-        longitude = float(chunk.get('longitude', 0.0))
-        latitude = float(chunk.get('latitude', 0.0))
-
-        lambda_ = float(chunk.get('lambda_', 0.0))
-        ra = float(chunk.get('ra', 0.0))
-        dec = float(chunk.get('dec', 0.0))
-
         # Get the lists from the chunk
         antenna1 = chunk.get('antenna1', [])
         antenna2 = chunk.get('antenna2', [])
@@ -184,8 +168,6 @@ def process_chunk(chunk):
         u = chunk.get('u', [])
         v = chunk.get('v', [])
         w = chunk.get('w', [])
-        Lx = chunk.get('Lx', [])
-        Ly = chunk.get('Ly', [])
 
         expected_shapes = {
             'visibilities': (nrows, n_channels, n_correlations),
@@ -199,7 +181,7 @@ def process_chunk(chunk):
 
         rows = []
 
-        for i, (a1, a2, sc, ex, it, tm, uu, vv, ww, xx, yy) in enumerate(zip(antenna1, antenna2, scan_number, exposure, interval, time, u, v, w, Lx, Ly)):
+        for i, (a1, a2, sc, ex, it, tm, uu, vv, ww) in enumerate(zip(antenna1, antenna2, scan_number, exposure, interval, time, u, v, w)):
             vs, wg, fg = extract_data(visibilities, flag, weight, i)
 
             rows.append(
@@ -218,19 +200,12 @@ def process_chunk(chunk):
                     'antenna2': int(a2),
                     'scan_number': int(sc),
                     'baseline_key': normalize_baseline_key(a1, a2),
-                    'longitude': longitude,
-                    'latitude': latitude,
-                    'lambda_': lambda_,
-                    'ra': ra,
-                    'dec': dec,
                     'exposure': float(ex),
                     'interval': float(it),
                     'time': float(tm),
                     'u': float(uu),
                     'v': float(vv),
                     'w': float(ww),
-                    'Lx': float(xx),
-                    'Ly': float(yy),
                     'visibilities': vs,
                     'weight': wg,
                     'flag': fg
@@ -269,19 +244,12 @@ def deserialize_chunk_to_rows(iterator):
                     row.get('antenna2'),
                     row.get('scan_number'),
                     row.get('baseline_key'),
-                    row.get('longitude'),
-                    row.get('latitude'),
-                    row.get('lambda_'),
-                    row.get('ra'),
-                    row.get('dec'),
                     row.get('exposure'),
                     row.get('interval'),
                     row.get('time'),
                     row.get('u'),
                     row.get('v'),
                     row.get('w'),
-                    row.get('Lx'),
-                    row.get('Ly'),
                     row.get('visibilities', []),
                     row.get('weight', []),
                     row.get('flag', [])
@@ -304,16 +272,18 @@ def process_streaming_batch(df, epoch_id, bda_config, grid_config):
         # Apply distributed BDA pipeline to processed visibility data
         bda_result = apply_bda(df, bda_config)
 
-        """ processing_time = (time.time() - start_time) * 1000
+        print("Rows after BDA:", bda_result.count())
+
+        processing_time = (time.time() - start_time) * 1000
         print(f"BDA processing completed in {processing_time:.0f} ms.\n")
 
-        # Apply distributed gridding to BDA-processed data
+        """ # Apply distributed gridding to BDA-processed data
         grid_result = apply_gridding(bda_result, grid_config)
 
         processing_time = (time.time() - start_time) * 1000
-        print(f"Gridding processing completed in {processing_time:.0f} ms.\n") """
+        print(f"Gridding processing completed in {processing_time:.0f} ms.\n")
 
-        return bda_result
+        return grid_result """
 
     except Exception as e:
         print(f"Error in microbatch {epoch_id}: {e}")
@@ -440,13 +410,13 @@ def run_consumer(kafka_servers: str = "localhost:9092",
         plt.savefig('uv_coverage_bda.png')
         plt.close(fig2) """
 
-        print("Combining gridded visibilities...")
+        """ print("Combining gridded visibilities...")
         gridded_visibilities_df = reduce(DataFrame.unionByName, gridded_visibilities)
         final_gridded = consolidate_gridding(gridded_visibilities_df)
 
         print("Generating dirty image...")
         generate_dirty_image(final_gridded, grid_config)
-        print("Dirty image generated.")
+        print("Dirty image generated.") """
 
     except KeyboardInterrupt:
         print("\nStopping consumer.")
