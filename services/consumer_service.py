@@ -272,18 +272,16 @@ def process_streaming_batch(df, epoch_id, bda_config, grid_config):
         # Apply distributed BDA pipeline to processed visibility data
         bda_result = apply_bda(df, bda_config)
 
-        print("Rows after BDA:", bda_result.count())
-
         processing_time = (time.time() - start_time) * 1000
         print(f"BDA processing completed in {processing_time:.0f} ms.\n")
 
-        """ # Apply distributed gridding to BDA-processed data
+        # Apply distributed gridding to BDA-processed data
         grid_result = apply_gridding(bda_result, grid_config)
 
         processing_time = (time.time() - start_time) * 1000
         print(f"Gridding processing completed in {processing_time:.0f} ms.\n")
 
-        return grid_result """
+        return grid_result
 
     except Exception as e:
         print(f"Error in microbatch {epoch_id}: {e}")
@@ -330,7 +328,7 @@ def run_consumer(kafka_servers: str = "localhost:9092",
                 print(f"Microbatch {epoch_id} is empty.")
                 return
 
-            print("=" * 40)
+            print("=" * 60 + "\n")
             print(f"Microbatch {epoch_id} processing.\n")
 
             # Usar mapPartitions para deserializar cada partición
@@ -341,7 +339,7 @@ def run_consumer(kafka_servers: str = "localhost:9092",
             if grid_result is not None:
                 gridded_visibilities.append(grid_result)
 
-            print("=" * 40 + "\n")
+            print("=" * 60 + "\n")
 
         # Create unique checkpoint directory for streaming state management
         checkpoint_path = f"/tmp/spark-bda-{uuid.uuid4().hex[:8]}-{int(time.time())}"
@@ -410,13 +408,13 @@ def run_consumer(kafka_servers: str = "localhost:9092",
         plt.savefig('uv_coverage_bda.png')
         plt.close(fig2) """
 
-        """ print("Combining gridded visibilities...")
+        print("Combining gridded visibilities...")
         gridded_visibilities_df = reduce(DataFrame.unionByName, gridded_visibilities)
         final_gridded = consolidate_gridding(gridded_visibilities_df)
 
         print("Generating dirty image...")
         generate_dirty_image(final_gridded, grid_config)
-        print("Dirty image generated.") """
+        print("Dirty image generated.")
 
     except KeyboardInterrupt:
         print("\nStopping consumer.")
