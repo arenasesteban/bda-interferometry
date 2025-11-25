@@ -2,8 +2,6 @@ import json
 from pathlib import Path
 import traceback
 
-from .bda_core import calculate_amplitude_loss, calculate_loss_exact, calculate_threshold_loss 
-
 
 def load_bda_config(config_path):
     config_file = Path(config_path)
@@ -16,18 +14,12 @@ def load_bda_config(config_path):
             config = json.load(f)
         
         # Check presence of required scientific parameters
-        required_fields = ['decorr_limit', 'max_time_window']
+        required_fields = ['decorr_factor', 'fov']
         for field in required_fields:
             if field not in config:
                 raise ValueError(f"Missing required field '{field}' in BDA config")
-        
-        validated  = validate_bda_config(config)
-        updated = update_bda_config(validated)
 
-        with open(config_file, 'w') as f:
-            json.dump(updated, f, indent=4)
-
-        return updated
+        return validate_bda_config(config)
         
     except Exception as e:
         print(f"Error loading BDA config: {e}")
@@ -39,34 +31,12 @@ def validate_bda_config(config):
     try:
         validated = config.copy()
 
-        # Validate decorrelation limit (0 < δ ≤ 1)
-        if not (0.0 < validated['decorr_limit'] <= 1.0):
-            raise ValueError(f"decorr_limit must be in (0,1], got {validated['decorr_limit']}")
-
-        # Validate max time window (0 < τ ≤ 3600)
-        if not (0.0 < validated['max_time_window'] <= 3600.0):
-            raise ValueError(f"max_time_window must be in (0,3600], got {validated['max_time_window']}")
+        if not (0.0 < validated['decorr_factor'] <= 1.0):
+            raise ValueError("decorr_factor must be in the range (0.0, 1.0]")
 
         return validated
 
     except Exception as e:
         print(f"Error validating BDA config: {e}")
-        traceback.print_exc()
-        raise
-
-
-def update_bda_config(config):
-    try:
-        decorr_limit = config['decorr_limit']
-        x_exact = calculate_loss_exact(decorr_limit)
-        x = calculate_threshold_loss(x_exact)
-
-        updated = config.copy()
-        updated['x'] = x
-
-        return updated
-
-    except Exception as e:
-        print(f"Error updating BDA config: {e}")
         traceback.print_exc()
         raise
