@@ -1,13 +1,14 @@
 import numpy as np
 import traceback
 
-from pyspark.sql.types import StructType, StructField, DoubleType, ArrayType, IntegerType
+from pyspark.sql.types import StructType, StructField, DoubleType, ArrayType, IntegerType, StringType
 from pyspark.sql.functions import pandas_udf, PandasUDFType
+import pandas as pd
 
-from .bda_core import calculate_numerical_derivates, calculate_phase_rate
+from .bda_core import calculate_phase_difference, calculate_uv_distance, sinc
 
 
-def assign_temporal_window(df, x):
+def assign_temporal_window(df, decorr_factor, fov):
     """
     Assign temporal windows based on accumulated x value.
 
@@ -15,8 +16,10 @@ def assign_temporal_window(df, x):
     ----------
     df : pyspark.sql.DataFrame
         Input DataFrame with necessary columns.
-    x : float
-        Threshold x value for window assignment.
+    decorr_factor : float
+        Decorrelation factor threshold.
+    fov : float
+        Field of view parameter.
 
     Returns
     -------
@@ -25,43 +28,60 @@ def assign_temporal_window(df, x):
     """
     try:    
         schema = StructType(df.schema.fields + [
-            StructField('window_id', DoubleType(), True),
-            StructField('x_accumulated', DoubleType(), True)
+            StructField('window_id', IntegerType(), True),
+            StructField('d_uv', DoubleType(), True),
+            StructField('phi_dot', DoubleType(), True),
+            StructField('sinc_value', DoubleType(), True),
         ])
 
         @pandas_udf(schema, PandasUDFType.GROUPED_MAP)
         def assign_windows(pdf):
             pdf = pdf.sort_values(by='time').reset_index(drop=True)
-
             n = len(pdf)
+
             window_ids = np.zeros(n, dtype=np.float64)
-            x_accumulated = np.zeros(n, dtype=np.float64)
+            d_uv_arr = np.zeros(n, dtype=np.float64)
+            phi_dot_arr = np.zeros(n, dtype=np.float64)
+            sinc_arr = np.zeros(n, dtype=np.float64)
 
-            current_window = 0
-            x_acc = 0.0
+            current_window = 1
 
-            for i in range(n):
-                # Calculate effective integration time
-                dt_eff = pdf.loc[i, 'exposure'] if pdf.loc[i, 'exposure'] > 0 else pdf.loc[i, 'interval']
+            u_ref = pdf.loc[0, 'u']
+            v_ref = pdf.loc[0, 'v']
+            window_ids[0] = current_window
 
-                if dt_eff <= 0:
-                    dt_eff = 0.0
+            d_uv_arr[0] = np.nan
+            phi_dot_arr[0] = np.nan
+            sinc_arr[0] = np.nan
 
-                phi_dot = pdf.loc[i, 'phi_dot']
-                x_inc = abs(phi_dot) * dt_eff / 2.0
+            for i in range(1, n):                
+                u = pdf.loc[i, 'u']
+                v = pdf.loc[i, 'v']
 
-                # Check if should close current window
-                if (x_acc + x_inc) > x: 
+                d_uv = calculate_uv_distance(u, v, u_ref, v_ref)
+                delta_phi = calculate_phase_difference(d_uv, fov)
+                
+                # Calculate decorrelation term
+                # sinc(ΔΦ/2)
+                sinc_val = sinc(delta_phi / 2.0)
+
+                # Window assignment based on decorrelation factor
+                if sinc_val >= decorr_factor:
+                    window_ids[i] = current_window
+                else:
                     current_window += 1
-                    x_acc = x_inc # Reset accumulated x for new window
-                else: 
-                    x_acc += x_inc # Continue accumulating in current window
+                    window_ids[i] = current_window
 
-                window_ids[i] = current_window
-                x_accumulated[i] = x_acc
-            
+                    u_ref, v_ref = u, v
+
+                d_uv_arr[i] = d_uv
+                phi_dot_arr[i] = delta_phi
+                sinc_arr[i] = sinc_val
+
             pdf['window_id'] = window_ids
-            pdf['x_accumulated'] = x_accumulated
+            pdf['d_uv'] = d_uv_arr
+            pdf['phi_dot'] = phi_dot_arr
+            pdf['sinc_value'] = sinc_arr
 
             return pdf
 
@@ -91,17 +111,17 @@ def average_by_window(df):
     """
     try:
         schema =  StructType([
-            StructField('subms_id', DoubleType(), True),
-            StructField('field_id', DoubleType(), True),
-            StructField('spw_id', DoubleType(), True),
-            StructField('polarization_id', DoubleType(), True),
-            StructField('n_channels', DoubleType(), True),
-            StructField('n_correlations', DoubleType(), True),
-            StructField('antenna1', DoubleType(), True),
-            StructField('antenna2', DoubleType(), True),
-            StructField('baseline_key', DoubleType(), True),
-            StructField('scan_number', DoubleType(), True),
-            StructField('window_id', DoubleType(), True),
+            StructField('subms_id', IntegerType(), True),
+            StructField('field_id', IntegerType(), True),
+            StructField('spw_id', IntegerType(), True),
+            StructField('polarization_id', IntegerType(), True),
+            StructField('n_channels', IntegerType(), True),
+            StructField('n_correlations', IntegerType(), True),
+            StructField('antenna1', IntegerType(), True),
+            StructField('antenna2', IntegerType(), True),
+            StructField('baseline_key', StringType(), True),
+            StructField('scan_number', IntegerType(), True),
+            StructField('window_id', IntegerType(), True),
             StructField('time', DoubleType(), True),
             StructField('interval', DoubleType(), True),
             StructField('exposure', DoubleType(), True),
@@ -139,58 +159,58 @@ def average_by_window(df):
                 vs_list, ws_list, fs_list = [], [], []
 
                 for i in range(n):
+
                     vs_data = pdf.iloc[i]['visibilities']
-                    ws_data = pdf.loc[i, 'weight']
-                    fs_data = pdf.loc[i, 'flag']
+                    ws_data = pdf.iloc[i]['weight']
+                    fs_data = pdf.iloc[i]['flag']
 
                     visibilities = np.array([[corr for corr in chan] for chan in vs_data], dtype=np.float64)
                     weights = np.array([w for w in ws_data], dtype=np.float64)
                     flags = np.array([[f for f in chan] for chan in fs_data], dtype=np.bool_)
 
-                    """ if bda_avg['baseline_key'] == "0-1":
-                        print(f"[DEBUG][VISIBILITIES SHAPE]: {visibilities.shape}")
-                        print(f"[DEBUG][VISIBILITIES]: {visibilities}")
+                    if bda_avg['baseline_key'] == "0-1":
+                        print(f"[DEBUG] Baseline {bda_avg['baseline_key']}")
+                        print(f"Window ID = {bda_avg['window_id']}")
+                        print(f"Time = {pdf.iloc[i]['time'] * 86400.0}")
+                        print(f"Coords = ({pdf.iloc[i]['u']}, {pdf.iloc[i]['v']})")
+                        print(f"d_uv = {pdf.iloc[i]['d_uv']}")
+                        print(f"phi_dot = {pdf.iloc[i]['phi_dot']}")
+                        print(f"sinc_value = {pdf.iloc[i]['sinc_value']}\n")
+                        print("-" * 60 + "\n")
 
-                        print(f"[DEBUG][WEIGHTS SHAPE]: {weights.shape}")
-                        print(f"[DEBUG][WEIGHTS]: {weights}")
-
-                        print(f"[DEBUG][FLAGS SHAPE]: {flags.shape}")
-                        print(f"[DEBUG][FLAGS]: {flags}") """
 
                     vs_list.append(visibilities)
                     ws_list.append(weights)
                     fs_list.append(flags)
                 
-                vs = np.stack(vs_list, axis=0)
-                ws = np.stack(ws_list, axis=0)
-                fs = np.stack(fs_list, axis=0)
+                vs = np.stack(vs_list, axis=0) # Shape: (N, C, P, 2)
+                ws = np.stack(ws_list, axis=0) # Shape: (N, P)
+                fs = np.stack(fs_list, axis=0) # Shape: (N, C, P)
 
                 N, C, P, _ = vs.shape
-                valid_mask = ~fs.astype(bool)
+                valid_mask = ~fs
 
                 ws_broadcast = ws[:, None, :]
                 ws_broadcast = np.broadcast_to(ws_broadcast, (N, C, P))
                 ws_valid = np.where(valid_mask, ws_broadcast, 0.0)
-                ws_sum = np.sum(ws_valid, axis=0)
+                ws_sum = ws_valid.sum(axis=0)
 
                 vs_real = (vs[..., 0] * ws_valid).sum(axis=0)
                 vs_imag = (vs[..., 1] * ws_valid).sum(axis=0)
 
                 with np.errstate(divide='ignore', invalid='ignore'):
-                    vs_avg_real = np.where(ws_sum > 0, vs_real / ws_sum, 0.0)
-                    vs_avg_imag = np.where(ws_sum > 0, vs_imag / ws_sum, 0.0)
-                
-                valid_count = (ws_valid > 0).sum(axis=0)
+                    real_avg = np.where(ws_sum > 0, vs_real / ws_sum, 0.0)
+                    imag_avg = np.where(ws_sum > 0, vs_imag / ws_sum, 0.0)
 
-                vs_avg = np.stack([vs_avg_real, vs_avg_imag], axis=-1)
-                ws_avg = np.where(valid_count > 0, ws_sum / valid_count, 0.0).mean()
+                vs_avg = np.stack([real_avg, imag_avg], axis=-1)
+                ws_avg = ws_sum.mean(axis=0)
                 fs_avg = (ws_sum == 0).astype(np.int32)
 
                 bda_avg['visibilities'] = vs_avg.tolist()
                 bda_avg['weight'] = ws_avg.tolist()
                 bda_avg['flag'] = fs_avg.tolist()
 
-                return bda_avg
+                return pd.DataFrame([bda_avg])
 
             except Exception as e:
                 print(f"Error averaging visibilities: {e}")
@@ -225,22 +245,11 @@ def process_rows(df, bda_config):
         Processed DataFrame after applying BDA.
     """
     try:
-        fov = bda_config.get('fov', 1.0)
-        x = bda_config.get('x', 0.0)
+        decorr_factor = bda_config.get('decorr_factor', 0.95)
+        fov = bda_config.get('fov', 0.01)
 
-        print(f"[DEBUG] Initial df count: {df.count()}")
-        df = calculate_numerical_derivates(df)
-
-        print(f"[DEBUG] df count after derivates: {df.count()}")
-        df = calculate_phase_rate(df, fov)
-
-        print(f"[DEBUG] df count after phase rate: {df.count()}")
-        df_windowed = assign_temporal_window(df, x)
-
-        print(f"[DEBUG] df count after window assignment: {df_windowed.count()}")
+        df_windowed = assign_temporal_window(df, decorr_factor, fov)
         df_avg = average_by_window(df_windowed)
-
-        print(f"[DEBUG] df count after averaging: {df_avg.count()}")
 
         return df_avg
 
