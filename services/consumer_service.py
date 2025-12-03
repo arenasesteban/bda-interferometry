@@ -465,7 +465,8 @@ def main():
             max_offsets_per_trigger=args.max_offsets
         )
     except Exception as e:
-        print(f"Fatal error: {e}")
+        print(f"Fatal error in main: {e}")
+        traceback.print_exc()
         sys.exit(1)
 
 
