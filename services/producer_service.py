@@ -38,6 +38,19 @@ from data.extraction import stream_subms_chunks
 
 
 def load_simulation_config(config_path):
+    """
+    Load simulation configuration from a JSON file.
+    
+    Parameters
+    ----------
+    config_path : str
+        Path to the configuration JSON file.
+    
+    Returns
+    -------
+    dict
+        Configuration dictionary.
+    """
     if config_path and Path(config_path).exists():
         try:
             with open(config_path, 'r') as f:
@@ -50,6 +63,22 @@ def load_simulation_config(config_path):
 
 
 def update_bda_config(config_path, ref_nu, min_diameter):
+    """
+    Update the BDA configuration file with new values.
+
+    Parameters
+    ----------
+    config_path : str
+        Path to the configuration JSON file.
+    ref_nu : float
+        Reference frequency.
+    min_diameter : float
+        Minimum diameter.
+
+    Returns
+    -------
+    None
+    """
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
@@ -67,11 +96,29 @@ def update_bda_config(config_path, ref_nu, min_diameter):
 
 
 def update_grid_config(config_path, theo_resolution, corrs_string, chan_freq):
+    """
+    Update the grid configuration file with new values.
+    
+    Parameters
+    ----------
+    config_path : str
+        Path to the configuration JSON file.
+    theo_resolution : float
+        Theoretical resolution.
+    corrs_string : str
+        Correlations string.
+    chan_freq : list
+        List of channel frequencies.
+    
+    Returns
+    -------
+    None
+    """
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
         
-        config['cellsize'] = (theo_resolution / 7).value
+        config['cellsize'] = (theo_resolution / 7)
         config['corrs_string'] = corrs_string
         config['chan_freq'] = chan_freq
 
@@ -85,6 +132,19 @@ def update_grid_config(config_path, theo_resolution, corrs_string, chan_freq):
 
 
 def serialize_chunk(chunk):
+    """
+    Serialize a chunk of data for Kafka.
+    
+    Parameters
+    ----------
+    chunk : dict
+        Chunk of data to serialize.
+    
+    Returns
+    -------
+    bytes
+        Serialized chunk.
+    """
     try:
         msgpack_chunk = {}
         
@@ -117,7 +177,20 @@ def serialize_chunk(chunk):
         raise
 
 
-def create_kafka_producer():
+def create_kafka_producer(kafka_servers=None):
+    """
+    Create a Kafka producer instance.
+
+    Parameters
+    ----------
+    kafka_servers : list, optional
+        List of Kafka server addresses. Defaults to DEFAULT_KAFKA_SERVERS.
+    
+    Returns
+    -------
+    KafkaProducer
+        Configured Kafka producer instance.
+    """
     try:
         if kafka_servers is None:
             kafka_servers = DEFAULT_KAFKA_SERVERS
@@ -144,6 +217,27 @@ def create_kafka_producer():
 
 
 def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enable_warmup):
+    """
+    Stream chunks of data to Kafka.
+
+    Parameters
+    ----------
+    dataset : Dataset
+        The Pyralysis dataset.
+    producer : KafkaProducer
+        The Kafka producer instance.
+    topic : str
+        Kafka topic to send data to.
+    base_streaming_delay : float
+        Base delay between sending chunks (in seconds).
+    enable_warmup : bool
+        Whether to enable warmup period for initial chunks.
+
+    Returns
+    -------
+    dict
+        Streaming statistics and metrics.
+    """
     # Initialize metrics and state
     pending_futures = []
     current_delay = 0.8 if enable_warmup else base_streaming_delay
@@ -289,6 +383,23 @@ def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enabl
 
 
 def run_producer_service(antenna_config_path, simulation_config_path, topic):
+    """
+    Run the producer service to stream data to Kafka.
+
+    Parameters
+    ----------
+    antenna_config_path : str
+        Path to the antenna configuration file.
+    simulation_config_path : str
+        Path to the simulation configuration file.
+    topic : str
+        Kafka topic to send data to.
+    
+    Returns
+    -------
+    dict
+        Streaming results and metrics.
+    """
     producer = None
     
     if topic is None:
@@ -296,7 +407,8 @@ def run_producer_service(antenna_config_path, simulation_config_path, topic):
     
     try:
         sim_config = load_simulation_config(simulation_config_path)
-        
+        print("✓ Loaded simulation configuration.")
+
         dataset = generate_dataset(
             antenna_config_path=antenna_config_path,
             freq_min=sim_config["freq_min"],
@@ -307,12 +419,14 @@ def run_producer_service(antenna_config_path, simulation_config_path, topic):
             integration_time=sim_config["integration_time"],
             source_path=sim_config["source_path"]
         )
+        print("✓ Dataset generation complete.")
 
         update_bda_config(
             config_path="./configs/bda_config.json",
-            ref_nu=dataset.spws.ref_nu.value,
-            min_diameter=dataset.antenna.min_diameter.compute().value,
+            ref_nu=dataset.spws.ref_nu,
+            min_diameter=dataset.antenna.min_diameter,
         )
+        print("✓ BDA configuration updated.")
 
         update_grid_config(
             config_path="./configs/grid_config.json",
@@ -320,8 +434,11 @@ def run_producer_service(antenna_config_path, simulation_config_path, topic):
             corrs_string=dataset.polarization.corrs_string,
             chan_freq=dataset.spws.dataset[0].CHAN_FREQ.compute().values[0].tolist()
         )
+        print("✓ Grid configuration updated.")
 
         producer = create_kafka_producer()
+        print("✓ Kafka producer created.")
+
         streaming_results = stream_chunks_to_kafka(
             dataset, 
             producer, 
@@ -329,7 +446,8 @@ def run_producer_service(antenna_config_path, simulation_config_path, topic):
             sim_config.get('base_streaming_delay', 0.1),
             sim_config.get('enable_warmup', True)
         )
-        
+        print("✓ Streaming complete.")
+
         return streaming_results
 
     except Exception as e:
@@ -343,7 +461,10 @@ def run_producer_service(antenna_config_path, simulation_config_path, topic):
             producer.close()
 
 
-def main():    
+def main():
+    """
+    Main entry point for the producer service.
+    """
     parser = argparse.ArgumentParser(description="BDA Interferometry Producer Service")
     
     parser.add_argument("antenna_config", help="Path to antenna configuration file")

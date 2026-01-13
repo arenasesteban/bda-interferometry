@@ -19,6 +19,19 @@ np.random.seed(777)
 
 
 def load_antenna_configuration(antenna_config_path):
+    """
+    Load antenna configuration from a JSON file.
+
+    Parameters
+    ----------
+    antenna_config_path : str
+        Path to the antenna configuration JSON file.
+
+    Returns
+    -------
+    dict
+        Antenna configuration data.
+    """
     try:
         if not os.path.exists(antenna_config_path):
             raise FileNotFoundError(f"Antenna config not found: {antenna_config_path}")
@@ -33,6 +46,31 @@ def load_antenna_configuration(antenna_config_path):
 
 
 def configure_observation(interferometer, freq_min, freq_max, n_chans, observation_time, declination, integration_time):
+    """
+    Configure observation parameters for the interferometer.
+
+    Parameters
+    ----------
+    interferometer : Interferometer
+        The interferometer instance.
+    freq_min : float
+        Minimum frequency in GHz.
+    freq_max : float
+        Maximum frequency in GHz.
+    n_chans : int
+        Number of frequency channels.
+    observation_time : float
+        Total observation time in seconds.
+    declination : float
+        Declination of the observation in degrees.
+    integration_time : float
+        Integration time per sample in seconds.
+
+    Returns
+    -------
+    float
+        Reference frequency in GHz.
+    """
     try:
         if interferometer is None:
             raise ValueError("Interferometer cannot be None")
@@ -49,7 +87,7 @@ def configure_observation(interferometer, freq_min, freq_max, n_chans, observati
             reference_time=Time(date_string, format='iso'),
             observation_time=observation_time,
             declination=Angle(declination),
-            frequency_step_hz=None,
+            frequency_step=None,
             integration_time=integration_time * u.s,
         )
         
@@ -62,6 +100,21 @@ def configure_observation(interferometer, freq_min, freq_max, n_chans, observati
 
 
 def generate_point_sources(ref_freq, source_path):
+    """
+    Generate point sources for the simulation.
+
+    Parameters
+    ----------
+    ref_freq : float
+        Reference frequency in GHz.
+    source_path : str
+        Path to the source FITS file.
+
+    Returns
+    -------
+    list
+        List of generated point sources.
+    """
     try:
         if ref_freq is None:
             raise ValueError("Reference frequency must be configured first")
@@ -69,7 +122,7 @@ def generate_point_sources(ref_freq, source_path):
         sources = []
         
         io_fits = FITS(source_path)
-        image = io_fits.read_data()
+        image = io_fits.read()
 
         cellsize_rad = image.cellsize[1].to(u.rad).value
         n_pixels_fov = image.shape[-1]
@@ -77,7 +130,7 @@ def generate_point_sources(ref_freq, source_path):
         non_parametric_source = NonParametricSource(image=image, direction_cosines=(0, 0))
         sources.append(non_parametric_source)
 
-        n_sources = np.random.randint(8, high=15, size=1, dtype=int)
+        n_sources = np.random.randint(8, high=15, size=1, dtype=int)[0]
         s_0 = 0.15 * u.Jy
 
         pixel_coords_l = np.random.randint(-n_pixels_fov//2, n_pixels_fov//2, size=n_sources)
@@ -104,6 +157,21 @@ def generate_point_sources(ref_freq, source_path):
 
 
 def simulate_dataset(interferometer, sources):
+    """
+    Simulate a dataset using the given interferometer and sources.
+
+    Parameters
+    ----------
+    interferometer : Interferometer
+        The interferometer instance.
+    sources : list
+        List of point sources to simulate.
+
+    Returns
+    -------
+    Dataset
+        The simulated dataset.
+    """
     if interferometer is None:
         raise ValueError("Interferometer cannot be None")
     if sources is None:
@@ -119,6 +187,33 @@ def generate_dataset(antenna_config_path,
                      freq_min, freq_max, n_chans, 
                      observation_time, declination, integration_time,
                      source_path):
+    """
+    Generate a simulated dataset based on the provided parameters.
+
+    Parameters
+    ----------
+    antenna_config_path : str
+        Path to the antenna configuration JSON file.
+    freq_min : float
+        Minimum frequency in GHz.
+    freq_max : float
+        Maximum frequency in GHz.
+    n_chans : int
+        Number of frequency channels.
+    observation_time : float
+        Total observation time in seconds.
+    declination : float
+        Declination of the observation in degrees.
+    integration_time : float
+        Integration time per sample in seconds.
+    source_path : str
+        Path to the source FITS file.
+    
+    Returns
+    -------
+    Dataset
+        The generated simulated dataset.
+    """
     # Load antenna configuration
     interferometer = load_antenna_configuration(antenna_config_path)
     
