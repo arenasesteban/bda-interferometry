@@ -4,6 +4,19 @@ import traceback
 
 
 def load_bda_config(config_path):
+    """
+    Load and validate BDA configuration from a JSON file.
+    
+    Parameters
+    ----------
+    config_path : str
+        Path to the BDA configuration JSON file.
+    
+    Returns
+    -------
+    dict
+        Validated BDA configuration.
+    """
     config_file = Path(config_path)
     
     if not config_file.exists():
@@ -28,6 +41,19 @@ def load_bda_config(config_path):
 
 
 def validate_bda_config(config):
+    """
+    Validate BDA configuration parameters.
+    
+    Parameters
+    ----------
+    config : dict
+        BDA configuration dictionary.
+
+    Returns
+    -------
+    dict
+        Validated BDA configuration.
+    """
     try:
         validated = config.copy()
 
