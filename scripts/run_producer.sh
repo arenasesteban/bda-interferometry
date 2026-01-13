@@ -4,8 +4,8 @@
 # using the ALMA antenna configuration.
 
 # Configuration paths
-ANTENNA_CONFIG="./antenna_configs/alma.cycle10.1.cfg"
-SIMULATION_CONFIG="./configs/simulation/default.json"
+ANTENNA_CONFIG="./antenna_configs/skamid.cfg"
+SIMULATION_CONFIG="./configs/simulation/ska-mid-band-02.json"
 
 # Service path
 PRODUCER_SERVICE="./services/producer_service.py"

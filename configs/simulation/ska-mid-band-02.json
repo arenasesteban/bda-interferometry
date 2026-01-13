@@ -3,7 +3,7 @@
   "freq_max": 1760.0,
   "n_chans": 50,
   "observation_time": "00:10:00",
-  "declination": "-600d00m00s",
+  "declination": "-60d00m00s",
   "integration_time": 180.0,
-  "source_path": "example_images/3c288.fits"
+  "source_path": "../pyralysis/examples/example_images/3c288.fits"
 }
