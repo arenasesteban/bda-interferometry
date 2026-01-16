@@ -257,6 +257,8 @@ def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enabl
     send_times = []  # Store recent send times for averaging
     max_send_times_window = 50  # Keep last 50 send times
 
+    print("Starting streaming to Kafka...")
+
     try:
         for chunk in stream_subms_chunks(dataset):
             chunk_start_time = time.time()
@@ -409,16 +411,30 @@ def run_producer_service(antenna_config_path, simulation_config_path, topic):
         sim_config = load_simulation_config(simulation_config_path)
         print("✓ Loaded simulation configuration.")
 
-        dataset = generate_dataset(
-            antenna_config_path=antenna_config_path,
-            freq_min=sim_config["freq_min"],
-            freq_max=sim_config["freq_max"],
-            n_chans=sim_config["n_chans"],
-            observation_time=sim_config["observation_time"],
-            declination=sim_config["declination"],
-            integration_time=sim_config["integration_time"],
-            source_path=sim_config["source_path"]
-        )
+        if "source_path" in sim_config:
+            dataset = generate_dataset(
+                antenna_config_path=antenna_config_path,
+                freq_min=sim_config["freq_min"],
+                freq_max=sim_config["freq_max"],
+                n_chans=sim_config["n_chans"],
+                observation_time=sim_config["observation_time"],
+                declination=sim_config["declination"],
+                integration_time=sim_config["integration_time"],
+                source_path=sim_config["source_path"]
+            )
+        else:
+                dataset = generate_dataset(
+                antenna_config_path=antenna_config_path,
+                freq_min=sim_config["freq_min"],
+                freq_max=sim_config["freq_max"],
+                n_chans=sim_config["n_chans"],
+                observation_time=sim_config["observation_time"],
+                declination=sim_config["declination"],
+                integration_time=sim_config["integration_time"],
+                date_string=sim_config["date_string"],
+                flux_density=sim_config["flux_density"],
+                spectral_index=sim_config["spectral_index"]
+            )
         print("✓ Dataset generation complete.")
 
         update_bda_config(

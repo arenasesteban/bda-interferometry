@@ -1,0 +1,11 @@
+{
+    "freq_min": 35.0,
+    "freq_max": 50.0,
+    "n_chans": 50,
+    "date_string": "2002-05-10",
+    "observation_time": "00:05:00",
+    "declination": "-45d00m00s",
+    "integration_time": 180.0,
+    "flux_density": 1.0,
+    "spectral_index": 3.0
+}

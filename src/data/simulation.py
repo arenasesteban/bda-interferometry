@@ -45,7 +45,7 @@ def load_antenna_configuration(antenna_config_path):
         raise
 
 
-def configure_observation(interferometer, freq_min, freq_max, n_chans, observation_time, declination, integration_time):
+def configure_observation(interferometer, freq_min, freq_max, n_chans, observation_time, declination, integration_time, date_string=None):
     """
     Configure observation parameters for the interferometer.
 
@@ -65,6 +65,8 @@ def configure_observation(interferometer, freq_min, freq_max, n_chans, observati
         Declination of the observation in degrees.
     integration_time : float
         Integration time per sample in seconds.
+    date_string : str, optional
+        Date string for the observation.
 
     Returns
     -------
@@ -74,13 +76,14 @@ def configure_observation(interferometer, freq_min, freq_max, n_chans, observati
     try:
         if interferometer is None:
             raise ValueError("Interferometer cannot be None")
-            
+
+        if date_string is None:
+            date_string = datetime.datetime.now().strftime("%Y-%m-%d")
+        
         # Create frequency array
         freq = np.linspace(freq_min, freq_max, n_chans) * u.GHz
         ref_freq = np.median(freq)
 
-        date_string = datetime.datetime.now().strftime("%Y-%m-%d")
-        
         # Configure interferometer
         interferometer.configure_observation(
             frequencies=freq,
@@ -91,7 +94,7 @@ def configure_observation(interferometer, freq_min, freq_max, n_chans, observati
             integration_time=integration_time * u.s,
         )
         
-        return ref_freq
+        return freq, ref_freq
     
     except Exception as e:
         print(f"Error in configure_observation: {e}")
@@ -99,7 +102,7 @@ def configure_observation(interferometer, freq_min, freq_max, n_chans, observati
         raise
 
 
-def generate_point_sources(ref_freq, source_path):
+def generate_point_sources(ref_freq, source_path=None, freq=None, interferometer=None, flux_density=None, spectral_index=None):
     """
     Generate point sources for the simulation.
 
@@ -120,33 +123,54 @@ def generate_point_sources(ref_freq, source_path):
             raise ValueError("Reference frequency must be configured first")
 
         sources = []
-        
-        io_fits = FITS(source_path)
-        image = io_fits.read()
 
-        cellsize_rad = image.cellsize[1].to(u.rad).value
-        n_pixels_fov = image.shape[-1]
-        
-        non_parametric_source = NonParametricSource(image=image, direction_cosines=(0, 0))
-        sources.append(non_parametric_source)
+        if source_path is not None:
+            io_fits = FITS(source_path)
+            image = io_fits.read()
 
-        n_sources = np.random.randint(8, high=15, size=1, dtype=int)[0]
-        s_0 = 0.15 * u.Jy
+            cellsize_rad = image.cellsize[1].to(u.rad).value
+            n_pixels_fov = image.shape[-1]
+            
+            non_parametric_source = NonParametricSource(image=image, direction_cosines=(0, 0))
+            sources.append(non_parametric_source)
 
-        pixel_coords_l = np.random.randint(-n_pixels_fov//2, n_pixels_fov//2, size=n_sources)
-        pixel_coords_m = np.random.randint(-n_pixels_fov//2, n_pixels_fov//2, size=n_sources)
+            n_sources = np.random.randint(8, high=15, size=1, dtype=int)[0]
+            s_0 = 0.15 * u.Jy
 
-        l_0 = pixel_coords_l * cellsize_rad
-        m_0 = pixel_coords_m * cellsize_rad
-        
-        for i in range(n_sources):
-            source = PointSource(
-                reference_intensity=s_0,
-                spectral_index=0.0,
-                reference_frequency=ref_freq,
-                direction_cosines=(l_0[i], m_0[i])
-            )
-            sources.append(source)
+            pixel_coords_l = np.random.randint(-n_pixels_fov//2, n_pixels_fov//2, size=n_sources)
+            pixel_coords_m = np.random.randint(-n_pixels_fov//2, n_pixels_fov//2, size=n_sources)
+
+            l_0 = pixel_coords_l * cellsize_rad
+            m_0 = pixel_coords_m * cellsize_rad
+            
+            for i in range(n_sources):
+                source = PointSource(
+                    reference_intensity=s_0,
+                    spectral_index=0.0,
+                    reference_frequency=ref_freq,
+                    direction_cosines=(l_0[i], m_0[i])
+                )
+                sources.append(source)
+        else:
+            nodim_freq = freq.to(u.Hz).value
+            diameter = interferometer.antenna_array.diameters.compute()
+
+            fov = (c.value / nodim_freq[0]) / diameter[0]
+
+            n_sources = np.random.randint(1, high=20, size=1, dtype=int)[0]
+
+            s_0 = flux_density * u.mJy
+            l_0 = np.random.uniform(low=-fov, high=fov, size=n_sources)
+            m_0 = np.random.uniform(low=-fov, high=fov, size=n_sources)
+
+            for i in range(n_sources):
+                source = PointSource(
+                    reference_intensity=s_0,
+                    spectral_index=spectral_index,
+                    reference_frequency=ref_freq,
+                    direction_cosines=([l_0[i]], [m_0[i]])
+                )
+                sources.append(source)
             
         return sources
 
@@ -186,7 +210,8 @@ def simulate_dataset(interferometer, sources):
 def generate_dataset(antenna_config_path,
                      freq_min, freq_max, n_chans, 
                      observation_time, declination, integration_time,
-                     source_path):
+                     source_path=None, date_string=None,
+                     flux_density=None, spectral_index=None):
     """
     Generate a simulated dataset based on the provided parameters.
 
@@ -218,23 +243,35 @@ def generate_dataset(antenna_config_path,
     interferometer = load_antenna_configuration(antenna_config_path)
     
     # Configure observation parameters
-    ref_freq = configure_observation(
-        interferometer=interferometer,
-        freq_min=freq_min,
-        freq_max=freq_max,
-        n_chans=n_chans,
-        observation_time=observation_time,
-        declination=declination,
-        integration_time=integration_time
+    freq, ref_freq = configure_observation(
+        interferometer,
+        freq_min,
+        freq_max,
+        n_chans,
+        observation_time,
+        declination,
+        integration_time,
+        date_string=date_string
     )
-    
+
     # Generate point sources
-    sources = generate_point_sources(ref_freq=ref_freq, source_path=source_path)
+    if source_path is not None:
+        sources = generate_point_sources(ref_freq, source_path)
     
+    else:
+        sources = generate_point_sources(
+            ref_freq,
+            source_path,
+            freq,
+            interferometer,
+            flux_density,
+            spectral_index,
+        )
+
     # Create composite source model
     composite_source = CompositeSource(sources=sources)
-    
+
     # Run simulation
-    dataset = simulate_dataset(interferometer=interferometer, sources=composite_source)
+    dataset = simulate_dataset(interferometer, sources=composite_source)
 
     return dataset
