@@ -177,41 +177,72 @@ def serialize_chunk(chunk):
         raise
 
 
-def create_kafka_producer(kafka_servers=None):
+def create_kafka_producer(kafka_servers=None, **kwargs):
     """
-    Create a Kafka producer instance.
+    Create a Kafka producer instance with optimized settings.
 
     Parameters
     ----------
     kafka_servers : list, optional
         List of Kafka server addresses. Defaults to DEFAULT_KAFKA_SERVERS.
+    **kwargs : dict
+        Additional producer configuration overrides.
     
     Returns
     -------
     KafkaProducer
         Configured Kafka producer instance.
-    """
-    try:
-        if kafka_servers is None:
-            kafka_servers = DEFAULT_KAFKA_SERVERS
-        
-        return KafkaProducer(
-            bootstrap_servers=kafka_servers,
-            compression_type='lz4',
-            batch_size=65536,
-            linger_ms=150,
-            max_request_size=2097152,
-            buffer_memory=33554432,
-            enable_idempotence=True,
-            acks='all',
-            retries=5,
-            max_in_flight_requests_per_connection=1,
-            value_serializer=serialize_chunk,
-            key_serializer=lambda x: str(x).encode('utf-8') if x is not None else None
-        )
     
+    Raises
+    ------
+    KafkaError
+        If producer creation fails.
+    """
+    kafka_servers = kafka_servers or DEFAULT_KAFKA_SERVERS
+    
+    producer_config = {
+        'bootstrap_servers': kafka_servers,
+        'value_serializer': serialize_chunk,
+        'key_serializer': lambda x: str(x).encode('utf-8') if x is not None else None,
+
+        # Compression and batching
+        'compression_type': 'lz4',
+        'batch_size': 65536,  # 64 KB
+        'linger_ms': 150,
+
+        # Buffer sizes
+        'max_request_size': 10485760,  # 10 MB
+        'buffer_memory': 33554432,  # 32 MB
+
+        # Reliability settings
+        'enable_idempotence': True,
+        'acks': 'all',
+        'retries': 5,
+
+        # Throughput optimizations
+        'max_in_flight_requests_per_connection': 1,
+
+        # Timeouts
+        'request_timeout_ms': 30000,
+        'delivery_timeout_ms': 120000,
+
+        # Metadata refresh
+        'metadata_max_age_ms': 300000, # 5 minutes
+    }
+
+    # Apply any overrides
+    producer_config.update(kwargs)
+    
+    try:
+        producer = KafkaProducer(**producer_config)
+        
+        return producer
+    
+    except KafkaError as e:
+        print(f"✗ Kafka error creating producer: {e}")
+        raise
     except Exception as e:
-        print(f"Error creating Kafka producer: {e}")
+        print(f"✗ Unexpected error creating producer: {e}")
         traceback.print_exc()
         raise
 
