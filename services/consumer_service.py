@@ -1,3 +1,9 @@
+"""
+Consumer Service - Interferometry Data Processing
+
+This service consumes visibility data chunks from a Kafka topic, processes them using a distributed BDA pipeline and gridding, and generates dirty images.
+"""
+
 import sys
 import argparse
 from pathlib import Path
@@ -7,21 +13,20 @@ import msgpack
 import numpy as np
 import zlib
 import uuid
-import matplotlib.pyplot as plt
+from functools import reduce
 
+from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     StringType, StructType, StructField, IntegerType,
     DoubleType, ArrayType
 )
 from pyspark.sql import DataFrame
-from functools import reduce
 
 # Add src directory to path
 project_root = Path(__file__).parent.parent
 src_path = project_root / "src"
 sys.path.append(str(src_path))
 
-from processing.spark_session import create_spark_session
 from bda.bda_config import load_bda_config
 from bda.bda_integration import apply_bda
 from imaging.gridding import apply_gridding, load_grid_config, consolidate_gridding
@@ -29,6 +34,14 @@ from imaging.dirty_image import generate_dirty_image
 
 
 def define_visibility_schema():
+    """
+    Define the Spark schema for visibility data rows.
+    
+    Returns
+    -------
+    StructType
+        Spark schema for visibility data.
+    """
     return StructType([
         StructField("subms_id", IntegerType(), True),
         StructField("chunk_id", IntegerType(), True),
@@ -65,31 +78,46 @@ def define_visibility_schema():
     ])
 
 def deserialize_array(field_dict, field_name, expected_shapes=None):
+    """
+    Deserialize a binary-encoded array from a dictionary.
+
+    Parameters
+    ----------
+    field_dict : dict
+        Dictionary containing 'type' and 'data' keys.
+    field_name : str
+        Name of the field being deserialized (for error messages).
+    expected_shapes : dict, optional
+        Expected shapes for different fields.
+    
+    Returns
+    -------
+    np.ndarray
+        Deserialized NumPy array.
+    """
     try:
         if not isinstance(field_dict, dict):
-            print(f"Error {field_name} is not a dict: {type(field_dict)}")
+            print(f"[WARN] {field_name} is not a dict: {type(field_dict)}")
             return np.array([])
         
         if 'type' not in field_dict or 'data' not in field_dict:
-            print(f"Error {field_name} missing 'type' or 'data' keys: {field_dict.keys()}")
+            print(f"[WARN] {field_name} missing keys: {field_dict.keys()}")
             return np.array([])
         
         array_type = field_dict['type']
         if array_type not in ['ndarray', 'ndarray_compressed']:
-            print(f"Error {field_name} unsupported type: {array_type}")
+            print(f"[WARN] {field_name} unsupported type: {array_type}")
             return np.array([])
         
-        # Obtener datos binarios
         binary_data = field_dict['data']
         
         if array_type == 'ndarray_compressed':
             try:
                 binary_data = zlib.decompress(binary_data)
             except zlib.error as e:
-                print(f"Error Failed to decompress {field_name}: {e}")
+                print(f"[ERROR] Failed to decompress {field_name}: {e}")
                 return np.array([])
-        
-        # Auto-detectar dtype basado en el nombre del campo
+
         if 'visibilities' in field_name.lower():
             array = np.frombuffer(binary_data, dtype=np.complex128)
         elif 'weight' in field_name.lower():
@@ -97,7 +125,7 @@ def deserialize_array(field_dict, field_name, expected_shapes=None):
         elif 'flag' in field_name.lower():
             array = np.frombuffer(binary_data, dtype=np.bool_)
         else:
-            print(f"Error unknown field type for {field_name}")
+            print(f"[ERROR] Unknown field type for {field_name}")
             return np.array([])
         
         if array.size > 0:
@@ -106,12 +134,34 @@ def deserialize_array(field_dict, field_name, expected_shapes=None):
         return array
         
     except Exception as e:
-        print(f"Error deserializing {field_name}: {e}")
+        print(f"[ERROR] Deserializing {field_name}: {e}")
         traceback.print_exc()
         raise
     
 
 def extract_data(visibilities, flag, weight, i):
+    """
+    Extract visibilities, weight, and flag data for a specific row index.
+
+    Parameters
+    ----------
+    visibilities : np.ndarray
+        Array of visibilities.
+    flag : np.ndarray
+        Array of flags.
+    weight : np.ndarray
+        Array of weights.
+    i : int
+        Row index to extract.
+    
+    Returns
+    -------
+    tuple
+        Tuple containing:
+        - visibilities as list of list of [real, imag]
+        - weight as list
+        - flag as list of list of int
+    """
     try:
         row_visibilities = visibilities[i] if i < len(visibilities) else np.array([])
         row_weight = weight[i] if i < len(weight) else np.array([])
@@ -130,21 +180,33 @@ def extract_data(visibilities, flag, weight, i):
         else:
             row_vis_list = []
 
-        # Convertir weight y flag a listas Python
         row_weight_list = row_weight.tolist() if row_weight.size > 0 else []
         row_flag_list = row_flag.astype(int).tolist() if row_flag.size > 0 else []
 
         return row_vis_list, row_weight_list, row_flag_list
 
     except Exception as e:
-        print(f"Error extracting data for row {i}: {e}")
+        print(f"[ERROR] Extracting data for row {i}: {e}")
         traceback.print_exc()
         raise
 
 
 def process_chunk(chunk):
+    """
+    Process a single chunk of visibility data.
+
+    Parameters
+    ----------
+    chunk : dict
+        Dictionary containing chunk metadata and data arrays.
+    
+    Returns
+    -------
+    list
+        List of processed rows from the chunk.
+    """
     try:
-        # Extract chunk metadata using standard field names
+        # Extract metadata
         subms_id = int(chunk.get('subms_id', -1))
         chunk_id = int(chunk.get('chunk_id', -1))
         field_id = int(chunk.get('field_id', -1))
@@ -152,13 +214,12 @@ def process_chunk(chunk):
         polarization_id = int(chunk.get('polarization_id', -1))
         nrows = int(chunk.get('nrows', 0))
     
-        # Extract data boundaries and array dimensions
         row_start = int(chunk.get('row_start', 0))
         row_end = int(chunk.get('row_end', nrows))
         n_channels = int(chunk.get('n_channels', 0))
         n_correlations = int(chunk.get('n_correlations', 0))
 
-        # Get the lists from the chunk
+        # Get the lists
         antenna1 = chunk.get('antenna1', [])
         antenna2 = chunk.get('antenna2', [])
         scan_number = chunk.get('scan_number', [])
@@ -181,7 +242,9 @@ def process_chunk(chunk):
 
         rows = []
 
-        for i, (a1, a2, sc, ex, it, tm, uu, vv, ww) in enumerate(zip(antenna1, antenna2, scan_number, exposure, interval, time, u, v, w)):
+        for i, (a1, a2, sc, ex, it, tm, uu, vv, ww) in enumerate(
+            zip(antenna1, antenna2, scan_number, exposure, interval, time, u, v, w)
+        ):
             vs, wg, fg = extract_data(visibilities, flag, weight, i)
 
             rows.append(
@@ -214,12 +277,25 @@ def process_chunk(chunk):
         return rows
     
     except Exception as e:
-        print(f"Error processing chunk: {e}")
+        print(f"[ERROR] Processing chunk: {e}")
         traceback.print_exc()
         raise
 
 
 def deserialize_chunk_to_rows(iterator):
+    """
+    Deserialize visibility chunks from Kafka messages into rows.
+
+    Parameters
+    ----------
+    iterator : iterator
+        Iterator over Kafka messages.
+    
+    Returns
+    -------
+    iterator
+        Iterator over deserialized visibility rows.
+    """
     all_rows = []
 
     for message in iterator:
@@ -257,60 +333,126 @@ def deserialize_chunk_to_rows(iterator):
                 all_rows.append(spark_row)
              
         except Exception as e:
-            print(f"Error deserializing chunk: {e}")
+            print(f"[ERROR] Deserializing chunk: {e}")
             traceback.print_exc()
             raise
     
     return iter(all_rows)
 
-def process_streaming_batch(df, epoch_id, bda_config, grid_config):    
+def process_streaming_batch(df, epoch_id, bda_config, grid_config):  
+    """
+    Process a microbatch of visibility data.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Spark DataFrame containing visibility data for the microbatch.
+    epoch_id : int
+        Unique identifier for the microbatch.
+    bda_config : dict
+        Configuration for the BDA processing.
+    grid_config : dict
+        Configuration for the gridding process.
+
+    Returns
+    -------
+    DataFrame
+        DataFrame containing gridded visibilities.
+    """  
     start_time = time.time()
     
     try:       
-        print("Rows in microbatch:", df.count())
+        row_count = df.count()
+        print(f"[Batch {epoch_id}] Processing {row_count} rows")
+
+        if row_count == 0:
+            print(f"[Batch {epoch_id}] Empty batch, skipping")
+            return None
         
-        # Apply distributed BDA pipeline to processed visibility data
+        # BDA processing
         bda_result = apply_bda(df, bda_config)
+        bda_time = (time.time() - start_time) * 1000
+        print(f"[Batch {epoch_id}] BDA completed in {bda_time:.0f} ms")
 
-        processing_time = (time.time() - start_time) * 1000
-        print(f"BDA processing completed in {processing_time:.0f} ms.\n")
-
-        # Apply distributed gridding to BDA-processed data
+        # Gridding
         grid_result = apply_gridding(bda_result, grid_config)
+        total_time = (time.time() - start_time) * 1000
+        print(f"[Batch {epoch_id}] Gridding completed in {total_time - bda_time:.0f} ms")
+        print(f"[Batch {epoch_id}] Total processing: {total_time:.0f} ms")
 
-        processing_time = (time.time() - start_time) * 1000
-        print(f"Gridding processing completed in {processing_time:.0f} ms.\n")
 
         return grid_result
 
     except Exception as e:
-        print(f"Error in microbatch {epoch_id}: {e}")
+        print(f"[ERROR] Batch {epoch_id}: {e}")
         traceback.print_exc()
+        raise
 
 
-def normalize_baseline_key(antenna1: int, antenna2: int) -> str:
-    # Order antennas by ID to ensure consistent baseline representation
+def normalize_baseline_key(antenna1, antenna2):
+    """Normalize baseline key for consistent representation."""
     ant_min, ant_max = sorted([antenna1, antenna2])
-    
     return f"{ant_min}-{ant_max}"
 
 
-def run_consumer(kafka_servers: str = "localhost:9092", 
-                      topic: str = "visibility-stream",
-                      config_path: str = None,
-                      max_offsets_per_trigger: int = 200) -> None:
-    print(f"Running Consumer Service: Kafka={kafka_servers}, Topic={topic}.")
-    spark = create_spark_session(config_path)
+def create_spark_session():
+    """
+    Create and configure a Spark session for interferometry data processing.
+
+    Returns
+    -------
+        SparkSession: Configured Spark session.
+    """    
+    spark = SparkSession.builder \
+        .appName("BDA-Interferometry-Consumer") \
+        .getOrCreate()
+    
+    spark.sparkContext.setLogLevel("WARN")
+
+    print(f"[Spark] Master: {spark.sparkContext.master}")
+    print(f"[Spark] App ID: {spark.sparkContext.applicationId}")
+
+    return spark
+
+
+def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, output_dir):
+    """
+    Run the consumer service to process visibility data from Kafka.
+
+    Parameters
+    ----------
+    bootstrap_server : str
+        Kafka bootstrap server address.
+    topic : str
+        Kafka topic name.
+    bda_config : str
+        Path to BDA configuration file.
+    grid_config : str
+        Path to grid configuration file.
+
+    Returns
+    -------
+    None
+    """
+    print("=" * 80)
+    print(f"[Consumer] Starting service")
+    print(f"[Consumer] Kafka: {bootstrap_server}")
+    print(f"[Consumer] Topic: {topic}")
+    print(f"[Consumer] BDA :  {bda_config_path}")
+    print(f"[Consumer] Grid:  {grid_config_path}")
+    print("=" * 80)
+    
+    spark = create_spark_session()
     
     try:        
         kafka_df = spark \
             .readStream \
             .format("kafka") \
-            .option("kafka.bootstrap.servers", kafka_servers) \
+            .option("kafka.bootstrap.servers", bootstrap_server) \
             .option("subscribe", topic) \
             .option("startingOffsets", "latest") \
             .option("failOnDataLoss", "false") \
-            .option("maxOffsetsPerTrigger", str(max_offsets_per_trigger)) \
+            .option("maxOffsetsPerTrigger", "200") \
             .load()
         
         # Configure Kafka DataFrame
@@ -318,30 +460,33 @@ def run_consumer(kafka_servers: str = "localhost:9092",
         
         visibility_row_schema = define_visibility_schema()
 
-        bda_config = load_bda_config(str(project_root / "configs" / "bda_config.json"))
-        grid_config = load_grid_config(str(project_root / "configs" / "grid_config.json"))
+        bda_config = load_bda_config(bda_config_path)
+        grid_config = load_grid_config(grid_config_path)
 
         gridded_visibilities = []
 
         def process_batch(df, epoch_id):
             if df.isEmpty():
-                print(f"Microbatch {epoch_id} is empty.")
+                print(f"[Batch {epoch_id}] Empty, skipping")
                 return
 
-            print("=" * 60 + "\n")
-            print(f"Microbatch {epoch_id} processing.\n")
+            print("\n" + "=" * 80)
+            print(f"[Batch {epoch_id}] Starting processing")
+            print("=" * 80)
 
-            # Usar mapPartitions para deserializar cada partición
             deserialized_rdd = df.rdd.mapPartitions(deserialize_chunk_to_rows)
             deserialized_df = spark.createDataFrame(deserialized_rdd, visibility_row_schema)
 
             grid_result = process_streaming_batch(deserialized_df, epoch_id, bda_config, grid_config)
+            
             if grid_result is not None:
                 gridded_visibilities.append(grid_result)
+                print(f"[Batch {epoch_id}] ✓ Completed successfully")
+            else:
+                print(f"[Batch {epoch_id}] ✗ No output generated")
 
-            print("=" * 60 + "\n")
+            print("=" * 80 + "\n")
 
-        # Create unique checkpoint directory for streaming state management
         checkpoint_path = f"/tmp/spark-bda-{uuid.uuid4().hex[:8]}-{int(time.time())}"
 
         query = kafka_processed.writeStream \
@@ -350,122 +495,91 @@ def run_consumer(kafka_servers: str = "localhost:9092",
             .option("checkpointLocation", checkpoint_path) \
             .start()
 
-        print("Consumer ready.")
+        print("[Consumer] ✓ Streaming query started")
+        print("[Consumer] Waiting for data...")
+
         query.awaitTermination(timeout=70)
-
-        """ def plot_uv_coverage(u, v, title="UV Coverage", ax=None, color='red'):
-            if ax is None:
-                fig, ax = plt.subplots(figsize=(8, 8))
-
-            ax.scatter(u, v, s=1, alpha=0.5, c=color)
-            ax.scatter(-u, -v, s=1, alpha=0.5, c=color)
-
-            ax.set_xlabel('u (wavelengths)')
-            ax.set_ylabel('v (wavelengths)')
-            ax.set_title(title)
-            ax.set_aspect('equal')
-            ax.grid(True, alpha=0.3)
-            ax.axhline(0, color='k', linewidth=0.5)
-            ax.axvline(0, color='k', linewidth=0.5)
-            
-            return ax """
-
-        """ original_df = reduce(DataFrame.unionByName, original_visibilities)
-
-        u = []
-        v = []
-
-        rows = original_df.collect()
-
-        for row in rows:
-            u.append(row.u)
-            v.append(row.v)
-
-        u = np.array(u)
-        v = np.array(v)
-    
-        fig1, ax = plt.subplots(figsize=(8, 8))
-        plot_uv_coverage(u, v, title="UV Coverage Original", ax=ax, color='red')
-        plt.savefig('uv_coverage_original.png')
-        plt.close(fig1) """
-
-        """ bda_df = reduce(DataFrame.unionByName, gridded_visibilities)
-        
-        u_bda = []
-        v_bda = []
-
-        bda_rows = bda_df.collect()
-
-        for row in bda_rows:
-            u_bda.append(row.u)
-            v_bda.append(row.v)
-
-        u_bda = np.array(u_bda)
-        v_bda = np.array(v_bda)
-
-        fig2, bx = plt.subplots(figsize=(8, 8))
-        plot_uv_coverage(u_bda, v_bda, title="UV Coverage after BDA", ax=bx, color='blue')
-        plt.savefig('uv_coverage_bda.png')
-        plt.close(fig2) """
 
         print("Combining gridded visibilities...")
         gridded_visibilities_df = reduce(DataFrame.unionByName, gridded_visibilities)
         final_gridded = consolidate_gridding(gridded_visibilities_df)
 
-        print("Generating dirty image...")
-        generate_dirty_image(final_gridded, grid_config)
-        print("Dirty image generated.")
+        if gridded_visibilities:
+            print("\n[Consumer] Combining gridded visibilities...")
+            gridded_visibilities_df = reduce(DataFrame.unionByName, gridded_visibilities)
+            final_gridded = consolidate_gridding(gridded_visibilities_df)
+
+            print("[Consumer] Generating dirty image...")
+            output_path = Path(output_dir) / "dirty_image.fits"
+            generate_dirty_image(final_gridded, grid_config, str(output_path))
+            print(f"[Consumer] ✓ Dirty image saved to: {output_path}")
+        else:
+            print("[Consumer] No data processed, no image generated")
 
     except KeyboardInterrupt:
-        print("\nStopping consumer.")
+        print("\n[Consumer] Interrupted by user")
         
     except Exception as e:
-        print(f"Error in streaming: {e}")
+        print(f"[ERROR] Consumer failed: {e}")
         traceback.print_exc()
+        raise
         
     finally:
         spark.stop()
-        print("Consumer stopped successfully")
+        print("[Consumer] ✓ Stopped successfully")
 
 
-def main():    
-    parser = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter)
-    
-    parser.add_argument(
-        "--kafka-servers",
-        default="localhost:9092",
-        help="Kafka bootstrap servers (default: localhost:9092)"
+def main(): 
+    """
+    Main entry point for consumer service.
+    """
+def main(): 
+    """Main entry point for consumer service."""
+    parser = argparse.ArgumentParser(
+        description="BDA Interferometry Consumer Service",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
     parser.add_argument(
-        "--topic",
-        default="visibility-stream", 
-        help="Kafka topic name (default: visibility-stream)"
+        "--bootstrap-server", 
+        required=True,
+        help="Kafka bootstrap server address"
     )
-    
     parser.add_argument(
-        "--config",
-        help="Path to configuration file (optional)"
+        "--topic", 
+        required=True,
+        help="Kafka topic to consume from"
     )
-    
     parser.add_argument(
-        "--max-offsets",
-        type=int,
-        default=200,
-        help="Max offsets per trigger for throughput control (default: 200, test: 10, prod: 500+)"
+        "--bda-config", 
+        required=True,
+        help="Path to BDA configuration JSON file"
     )
-    
+    parser.add_argument(
+        "--grid-config", 
+        required=True,
+        help="Path to grid configuration JSON file"
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="./output",
+        help="Directory for output files"
+    )
+
     args = parser.parse_args()
+
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     
     try:
         run_consumer(
-            kafka_servers=args.kafka_servers,
+            bootstrap_server=args.bootstrap_server,
             topic=args.topic,
-            config_path=args.config,
-            max_offsets_per_trigger=args.max_offsets
+            bda_config_path=args.bda_config,
+            grid_config_path=args.grid_config,
+            output_dir=args.output_dir
         )
     except Exception as e:
-        print(f"Fatal error in main: {e}")
+        print(f"[FATAL] Consumer failed: {e}")
         traceback.print_exc()
         sys.exit(1)
 

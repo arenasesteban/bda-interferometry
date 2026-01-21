@@ -1,11 +1,7 @@
 """
 Producer Service - Interferometry Data Streaming Microservice
 
-Independent microservice that generates Pyralysis datasets and transmits
-chunks via Kafka using functional programming and lossless compression.
-
-This service creates simulated interferometry datasets and streams them
-as compressed chunks to Kafka topics for real-time data transmission.
+This service generates synthetic interferometric visibility data, serializes it, and streams it to a Kafka topic.
 """
 
 import sys
@@ -288,8 +284,6 @@ def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enabl
     send_times = []  # Store recent send times for averaging
     max_send_times_window = 50  # Keep last 50 send times
 
-    print("Starting streaming to Kafka...")
-
     try:
         for chunk in stream_subms_chunks(dataset):
             chunk_start_time = time.time()
@@ -381,8 +375,6 @@ def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enabl
     finally:
         # Wait for remaining futures
         if pending_futures:
-            print(f"Waiting for {len(pending_futures)} pending futures...")
-            
             for pending in pending_futures:
                 try:
                     pending['future'].get(timeout=10)
@@ -514,9 +506,9 @@ def main():
     """
     parser = argparse.ArgumentParser(description="BDA Interferometry Producer Service")
     
-    parser.add_argument("antenna_config", help="Path to antenna configuration file")
-    parser.add_argument("--simulation-config", help="Path to simulation configuration JSON file")
-    parser.add_argument("--topic", help=f"Kafka topic (default: {DEFAULT_TOPIC})")
+    parser.add_argument("--antenna-config", help="Path to antenna configuration file")
+    parser.add_argument("--simulation-config", help="Path to simulation configuration file")
+    parser.add_argument("--topic", help=f"Kafka topic name")
     
     args = parser.parse_args()
 
