@@ -387,10 +387,24 @@ def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enabl
         
         # Final flush
         producer.flush(timeout=5)
-        
+
         # Calculate final statistics
         sent_chunks = total_chunks - failed_chunks
         avg_send_time_final = sum(send_times) / len(send_times) if send_times else 0
+
+        print("\n[Producer] Sending END_OF_STREAM signal...")
+        control_message = {
+            'message_type': 'END_OF_STREAM',
+            'timestamp': time.time(),
+            'total_chunks': total_chunks,
+            'sent_chunks': sent_chunks,
+            'failed_chunks': failed_chunks
+        }
+        
+        producer.send(topic, value=control_message, key=b"__CONTROL__").get(timeout=10)
+
+        producer.flush(timeout=5)
+        print("[PRODUCER] ✓ END_OF_STREAM signal sent")
         
         print(f"\n=== Streaming Summary ===")
         print(f"Total chunks: {total_chunks}")
