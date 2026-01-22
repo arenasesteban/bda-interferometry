@@ -20,6 +20,7 @@ from pyspark.sql.types import (
     StringType, StructType, StructField, IntegerType,
     DoubleType, ArrayType
 )
+from pyspark.sql.functions import col
 from pyspark.sql import DataFrame
 
 # Add src directory to path
@@ -69,13 +70,11 @@ def define_visibility_schema():
         StructField("v", DoubleType(), True),
         StructField("w", DoubleType(), True),
 
-        # visibilities: [chan][corr] con [real, imag] -> Array de Array de Array de Double
         StructField("visibilities", ArrayType(ArrayType(ArrayType(DoubleType()))), True),
-        # weight: [corr] -> Array de Double
-        StructField("weight", ArrayType(DoubleType()), True),
-        # flag: [chan][corr] con 0/1 -> Array de Array de Integer
+        StructField("weight", ArrayType(ArrayType(DoubleType())), True),
         StructField("flag", ArrayType(ArrayType(IntegerType())), True)
     ])
+
 
 def deserialize_array(field_dict, field_name, expected_shapes=None):
     """
@@ -232,7 +231,7 @@ def process_chunk(chunk):
 
         expected_shapes = {
             'visibilities': (nrows, n_channels, n_correlations),
-            'weight': (nrows, n_correlations),
+            'weight': (nrows, n_channels, n_correlations),
             'flag': (nrows, n_channels, n_correlations)
         }
 
@@ -339,6 +338,7 @@ def deserialize_chunk_to_rows(iterator):
     
     return iter(all_rows)
 
+
 def process_streaming_batch(df, epoch_id, bda_config, grid_config):  
     """
     Process a microbatch of visibility data.
@@ -363,31 +363,40 @@ def process_streaming_batch(df, epoch_id, bda_config, grid_config):
     
     try:       
         row_count = df.count()
-        print(f"[Batch {epoch_id}] Processing {row_count} rows")
-
+        
         if row_count == 0:
             print(f"[Batch {epoch_id}] Empty batch, skipping")
             return None
         
+        # Collect chunk statistics
+        chunk_stats = df.select("subms_id", "chunk_id", "nrows").distinct().collect()
+        total_chunks_rows = sum([row.nrows for row in chunk_stats])
+        
+        print(f"[Batch {epoch_id}] Processing {row_count} visibility rows")
+        print(f"[Batch {epoch_id}] Chunks detail:")
+        for stat in chunk_stats:
+            print(f"  - Chunk {stat.chunk_id}: {stat.nrows} rows")
+        print(f"[Batch {epoch_id}] Total rows from chunks: {total_chunks_rows}")
+        
         # BDA processing
         bda_result = apply_bda(df, bda_config)
+        bda_count = bda_result.count()
         bda_time = (time.time() - start_time) * 1000
         print(f"[Batch {epoch_id}] BDA completed in {bda_time:.0f} ms")
+        print(f"[Batch {epoch_id}] BDA: {row_count} rows → {bda_count} rows")
 
         # Gridding
         grid_result = apply_gridding(bda_result, grid_config)
         total_time = (time.time() - start_time) * 1000
-        print(f"[Batch {epoch_id}] Gridding completed in {total_time - bda_time:.0f} ms")
+        print(f"[Batch {epoch_id}] Gridding completed in {total_time:.0f} ms")
         print(f"[Batch {epoch_id}] Total processing: {total_time:.0f} ms")
-
 
         return grid_result
 
     except Exception as e:
         print(f"[ERROR] Batch {epoch_id}: {e}")
         traceback.print_exc()
-        raise
-
+        return None
 
 def normalize_baseline_key(antenna1, antenna2):
     """Normalize baseline key for consistent representation."""
@@ -402,9 +411,13 @@ def create_spark_session():
     Returns
     -------
         SparkSession: Configured Spark session.
-    """    
+    """
+    project_root = Path(__file__).parent.parent
+    src_path = str(project_root / "src")
+
     spark = SparkSession.builder \
         .appName("BDA-Interferometry-Consumer") \
+        .config("spark.executorEnv.PYTHONPATH", src_path) \
         .getOrCreate()
     
     spark.sparkContext.setLogLevel("WARN")
@@ -415,7 +428,7 @@ def create_spark_session():
     return spark
 
 
-def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, output_dir):
+def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, dirty_image_output, psf_output):
     """
     Run the consumer service to process visibility data from Kafka.
 
@@ -452,11 +465,14 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, out
             .option("subscribe", topic) \
             .option("startingOffsets", "latest") \
             .option("failOnDataLoss", "false") \
-            .option("maxOffsetsPerTrigger", "200") \
+            .option("maxOffsetsPerTrigger", "300") \
             .load()
         
         # Configure Kafka DataFrame
-        kafka_processed = kafka_df.select(kafka_df.value.alias("chunk_data"),)
+        kafka_processed = kafka_df.select(
+            kafka_df.key.alias("message_key"),
+            kafka_df.value.alias("chunk_data")
+        )
         
         visibility_row_schema = define_visibility_schema()
 
@@ -464,12 +480,42 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, out
         grid_config = load_grid_config(grid_config_path)
 
         gridded_visibilities = []
+        stream_ended = False
+        last_batch_time = time.time()
 
-        def process_batch(df, epoch_id):
+        def process_batch(df, epoch_id):    
+            nonlocal stream_ended, last_batch_time
+
             if df.isEmpty():
                 print(f"[Batch {epoch_id}] Empty, skipping")
                 return
+            
+            last_batch_time = time.time()
 
+            control_messages = df.filter(
+                col("message_key").isNotNull() & 
+                col("message_key").cast("string").startswith("__CONTROL__")
+            ).collect()
+
+            if control_messages:
+                for msg in control_messages:
+                    try:
+                        control_data = msgpack.unpackb(msg.chunk_data, raw=False)
+                        if control_data.get('message_type') == 'END_OF_STREAM':
+                            print(f"\n[Batch {epoch_id}] ✓ Received END_OF_STREAM signal")
+                            stream_ended = True
+                    except Exception as e:
+                        print(f"[WARN] Error processing control message: {e}")
+            
+            df = df.filter(
+                col("message_key").isNull() |
+                ~col("message_key").cast("string").startswith("__CONTROL__")
+            ).select("chunk_data")
+        
+            if df.isEmpty():
+                print(f"[Batch {epoch_id}] Only control messages, skipping")
+                return
+            
             print("\n" + "=" * 80)
             print(f"[Batch {epoch_id}] Starting processing")
             print("=" * 80)
@@ -498,11 +544,48 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, out
         print("[Consumer] ✓ Streaming query started")
         print("[Consumer] Waiting for data...")
 
-        query.awaitTermination(timeout=70)
+        max_total_time = 300
+        check_interval = 2
+        start_time = time.time()
 
-        print("Combining gridded visibilities...")
-        gridded_visibilities_df = reduce(DataFrame.unionByName, gridded_visibilities)
-        final_gridded = consolidate_gridding(gridded_visibilities_df)
+        while time.time() - start_time < max_total_time:
+            time.sleep(check_interval)
+            
+            if stream_ended:
+                print("[Consumer] ✓ END_OF_STREAM received, waiting for active batches...")
+                
+                max_idle_time = 15
+                last_activity_time = time.time()
+                last_batch_id = -1
+                
+                while True:
+                    time.sleep(check_interval)
+                    
+                    try:
+                        last_progress = query.lastProgress
+                        
+                        if last_progress:
+                            current_batch_id = last_progress.get('batchId', -1)
+
+                            if current_batch_id != last_batch_id:
+                                last_batch_id = current_batch_id
+                                last_activity_time = time.time()
+                                num_rows = last_progress.get('numInputRows', 0)
+                                print(f"[Consumer] Processing batch {current_batch_id} ({num_rows} rows)...")
+
+                        idle_time = time.time() - last_activity_time
+                        if idle_time > max_idle_time:
+                            print(f"[Consumer] ✓ No new batches for {idle_time:.1f}s - all data processed")
+                            break
+                            
+                    except Exception as e:
+                        print(f"[WARN] Error checking query status: {e}")
+                        break
+                
+                break
+
+        print("[Consumer] Stopping query...")
+        query.stop()
 
         if gridded_visibilities:
             print("\n[Consumer] Combining gridded visibilities...")
@@ -510,14 +593,15 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, out
             final_gridded = consolidate_gridding(gridded_visibilities_df)
 
             print("[Consumer] Generating dirty image...")
-            output_path = Path(output_dir) / "dirty_image.fits"
-            generate_dirty_image(final_gridded, grid_config, str(output_path))
-            print(f"[Consumer] ✓ Dirty image saved to: {output_path}")
+
+            generate_dirty_image(final_gridded, grid_config, dirty_image_output, psf_output)
+            print(f"[Consumer] ✓ Dirty image saved to: {dirty_image_output}")
+            print(f"[Consumer] ✓ PSF image saved to: {psf_output}")
         else:
             print("[Consumer] No data processed, no image generated")
 
     except KeyboardInterrupt:
-        print("\n[Consumer] Interrupted by user")
+        print("[Consumer] Interrupted by user")
         
     except Exception as e:
         print(f"[ERROR] Consumer failed: {e}")
@@ -529,10 +613,6 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, out
         print("[Consumer] ✓ Stopped successfully")
 
 
-def main(): 
-    """
-    Main entry point for consumer service.
-    """
 def main(): 
     """Main entry point for consumer service."""
     parser = argparse.ArgumentParser(
@@ -561,14 +641,17 @@ def main():
         help="Path to grid configuration JSON file"
     )
     parser.add_argument(
-        "--output-dir",
-        default="./output",
-        help="Directory for output files"
+        "--dirty-image-output",
+        default="./output/dirty_image.png",
+        help="Path for dirty image output file"
+    )
+    parser.add_argument(
+        "--psf-output",
+        default="./output/psf.png",
+        help="Path for PSF output file"
     )
 
     args = parser.parse_args()
-
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     
     try:
         run_consumer(
@@ -576,7 +659,8 @@ def main():
             topic=args.topic,
             bda_config_path=args.bda_config,
             grid_config_path=args.grid_config,
-            output_dir=args.output_dir
+            dirty_image_output=args.dirty_image_output,
+            psf_output=args.psf_output
         )
     except Exception as e:
         print(f"[FATAL] Consumer failed: {e}")
