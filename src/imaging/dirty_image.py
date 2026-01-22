@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from pathlib import Path
 
 
 def dataframe_to_grid(gridded_df, grid_config):
@@ -22,7 +23,7 @@ def dataframe_to_grid(gridded_df, grid_config):
     return grids * 0.5, weights
 
 
-def generate_dirty_image(gridded_df, grid_config):
+def generate_dirty_image(gridded_df, grid_config, dirty_image_output, psf_output):
     print("Dataframe to grid conversion...")
     grids, weights = dataframe_to_grid(gridded_df, grid_config)
 
@@ -43,7 +44,6 @@ def generate_dirty_image(gridded_df, grid_config):
         start_y = (grid_size[1] - img_size) // 2
         dirty_image = dirty_image[start_x:start_x + img_size, start_y:start_y + img_size]
 
-    save_dirty_image(dirty_image)
     
     print("Generating PSF image via IFFT...")
 
@@ -53,10 +53,11 @@ def generate_dirty_image(gridded_df, grid_config):
 
     psf_image = psf_image * grid_size[0] * grid_size[1]
 
-    save_psf_image(psf_image)
+    save_dirty_image(dirty_image, dirty_image_output)
+    save_psf_image(psf_image, psf_output)
 
 
-def save_dirty_image(dirty_image):
+def save_dirty_image(dirty_image, output_file):
     plt.figure(figsize=(8, 8))
     plt.imshow(dirty_image, cmap='hot', origin='lower')
     plt.colorbar(label='Intensity')
@@ -64,11 +65,11 @@ def save_dirty_image(dirty_image):
     plt.xlabel('X [pixels]')
     plt.ylabel('Y [pixels]')
     plt.tight_layout()
-    plt.savefig('dirty_image_bda.png')
+    plt.savefig(output_file)
     plt.close()
 
 
-def save_psf_image(psf_image):
+def save_psf_image(psf_image, output_file):
     plt.figure(figsize=(8, 8))
     plt.imshow(psf_image, cmap='hot', origin='lower')
     plt.colorbar(label='Intensity')
@@ -76,5 +77,5 @@ def save_psf_image(psf_image):
     plt.xlabel('X [pixels]')
     plt.ylabel('Y [pixels]')
     plt.tight_layout()
-    plt.savefig('psf_image_bda.png')
+    plt.savefig(output_file)
     plt.close()

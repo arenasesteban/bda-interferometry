@@ -82,7 +82,7 @@ def process_gridding(iterator, grid_config):
                     vs_imag = visibilities[chan][corr][1]
                     vs_complex = complex(vs_real, vs_imag)
 
-                    ws = weights[corr] * 0.5
+                    ws = weights[chan][corr] * 0.5
 
                     grid_key = (u_pix, v_pix)
 
