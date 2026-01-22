@@ -137,28 +137,32 @@ def extract_chunk_data(
     try:
         chunk_size = end_row - start_row
 
-        print(f"Extracting chunk {chunk_id}: rows {start_row} to {end_row} (size {chunk_size})")
-
         return {
             "subms_id": subms.id,
             "chunk_id": chunk_id,
             "field_id": subms.field_id,
             "spw_id": subms.spw_id,
             "polarization_id": subms.polarization_id,
+
             "row_start": start_row,
             "row_end": end_row,
             "nrows": chunk_size,
+            
             "n_channels": n_channels,
             "n_correlations": n_correlations,
+
             "antenna1": convert_to_list(extract_field_data(vs_set.antenna1, start_row, end_row)),
             "antenna2": convert_to_list(extract_field_data(vs_set.antenna2, start_row, end_row)),
             "scan_number": convert_to_list(extract_field_data(vs_set.scan_number, start_row, end_row)),
+            
             "exposure": convert_to_list(extract_field_data(vs_set.dataset.EXPOSURE, start_row, end_row)),
             "interval": convert_to_list(extract_field_data(vs_set.dataset.INTERVAL, start_row, end_row)),
             "time": convert_to_list(extract_field_data(vs_set.time, start_row, end_row)),
+            
             "u": convert_to_list(extract_field_data(vs_set.uvw, start_row, end_row, coord_idx=0)),
             "v": convert_to_list(extract_field_data(vs_set.uvw, start_row, end_row, coord_idx=1)),
             "w": convert_to_list(extract_field_data(vs_set.uvw, start_row, end_row, coord_idx=2)),
+            
             "visibilities": visibilities[start_row:end_row].compute(),
             "weight": extract_field_data(vs_set.weight, start_row, end_row),
             "flag": extract_field_data(vs_set.flag, start_row, end_row),
