@@ -128,7 +128,7 @@ def average_by_window(df):
             StructField('u', DoubleType(), True),
             StructField('v', DoubleType(), True),
             StructField('visibilities', ArrayType(ArrayType(ArrayType(DoubleType()))), True),
-            StructField('weight', ArrayType(DoubleType()), True),
+            StructField('weight', (ArrayType(ArrayType(DoubleType()))), True),
             StructField('flag', ArrayType(ArrayType(IntegerType())), True)
         ])
 
@@ -165,34 +165,21 @@ def average_by_window(df):
                     fs_data = pdf.iloc[i]['flag']
 
                     visibilities = np.array([[corr for corr in chan] for chan in vs_data], dtype=np.float64)
-                    weights = np.array([w for w in ws_data], dtype=np.float64)
+                    weights = np.array([[w for w in chan] for chan in ws_data], dtype=np.float64)
                     flags = np.array([[f for f in chan] for chan in fs_data], dtype=np.bool_)
-
-                    if bda_avg['baseline_key'] == "0-1":
-                        print(f"[DEBUG] Baseline {bda_avg['baseline_key']}")
-                        print(f"Window ID = {bda_avg['window_id']}")
-                        print(f"Time = {pdf.iloc[i]['time'] * 86400.0}")
-                        print(f"Coords = ({pdf.iloc[i]['u']}, {pdf.iloc[i]['v']})")
-                        print(f"d_uv = {pdf.iloc[i]['d_uv']}")
-                        print(f"phi_dot = {pdf.iloc[i]['phi_dot']}")
-                        print(f"sinc_value = {pdf.iloc[i]['sinc_value']}\n")
-                        print("-" * 60 + "\n")
-
 
                     vs_list.append(visibilities)
                     ws_list.append(weights)
                     fs_list.append(flags)
                 
                 vs = np.stack(vs_list, axis=0) # Shape: (N, C, P, 2)
-                ws = np.stack(ws_list, axis=0) # Shape: (N, P)
+                ws = np.stack(ws_list, axis=0) # Shape: (N, C, P)
                 fs = np.stack(fs_list, axis=0) # Shape: (N, C, P)
 
                 N, C, P, _ = vs.shape
                 valid_mask = ~fs
 
-                ws_broadcast = ws[:, None, :]
-                ws_broadcast = np.broadcast_to(ws_broadcast, (N, C, P))
-                ws_valid = np.where(valid_mask, ws_broadcast, 0.0)
+                ws_valid = np.where(valid_mask, ws, 0.0)
                 ws_sum = ws_valid.sum(axis=0)
 
                 vs_real = (vs[..., 0] * ws_valid).sum(axis=0)
@@ -203,7 +190,7 @@ def average_by_window(df):
                     imag_avg = np.where(ws_sum > 0, vs_imag / ws_sum, 0.0)
 
                 vs_avg = np.stack([real_avg, imag_avg], axis=-1)
-                ws_avg = ws_sum.mean(axis=0)
+                ws_avg = ws_sum / N
                 fs_avg = (ws_sum == 0).astype(np.int32)
 
                 bda_avg['visibilities'] = vs_avg.tolist()
