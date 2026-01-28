@@ -43,8 +43,8 @@ KAFKA_PARTITIONS="1"
 # Paths
 DIRTYIMAGE_OUTPUT_DIR="./output/dirtyimage_$SLURM_JOB_ID.png"
 PSF_OUTPUT_DIR="./output/psf_$SLURM_JOB_ID.png"
-ANTENNA_CONFIG="./antenna_configs/alma.cycle10.1.cfg"
-SIMULATION_CONFIG="./configs/simulation/alma-band-02.json"
+ANTENNA_CONFIG="./antenna_configs/skamid.cfg"
+SIMULATION_CONFIG="./configs/simulation/ska-mid-band-02.json"
 BDA_CONFIG="./configs/bda_config.json"
 GRID_CONFIG="./configs/grid_config.json"
 
