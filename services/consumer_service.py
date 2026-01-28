@@ -301,6 +301,10 @@ def deserialize_chunk_to_rows(iterator):
         try:
             raw_data = message.chunk_data
             chunk = msgpack.unpackb(raw_data, raw=False, strict_map_key=False)
+
+            if chunk.get('message_type') == 'END_OF_STREAM':
+                continue
+
             chunk_rows = process_chunk(chunk)
 
             for row in chunk_rows:
@@ -379,14 +383,14 @@ def process_streaming_batch(df, epoch_id, bda_config, grid_config):
         print(f"[Batch {epoch_id}] Total rows from chunks: {total_chunks_rows}")
         
         # BDA processing
-        bda_result = apply_bda(df, bda_config)
+        """ bda_result = apply_bda(df, bda_config)
         bda_count = bda_result.count()
         bda_time = (time.time() - start_time) * 1000
         print(f"[Batch {epoch_id}] BDA completed in {bda_time:.0f} ms")
-        print(f"[Batch {epoch_id}] BDA: {row_count} rows → {bda_count} rows")
+        print(f"[Batch {epoch_id}] BDA: {row_count} rows → {bda_count} rows") """
 
         # Gridding
-        grid_result = apply_gridding(bda_result, grid_config)
+        grid_result = apply_gridding(df, grid_config)
         total_time = (time.time() - start_time) * 1000
         print(f"[Batch {epoch_id}] Gridding completed in {total_time:.0f} ms")
         print(f"[Batch {epoch_id}] Total processing: {total_time:.0f} ms")
@@ -544,7 +548,7 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, dir
         print("[Consumer] ✓ Streaming query started")
         print("[Consumer] Waiting for data...")
 
-        max_total_time = 300
+        max_total_time = 300  # 5 minutes
         check_interval = 2
         start_time = time.time()
 
