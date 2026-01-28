@@ -1,9 +1,9 @@
 {
-    "freq_min": 35.0,
-    "freq_max": 50.0,
+    "freq_min": 35,
+    "freq_max": 50,
     "n_chans": 50,
     "date_string": "2002-05-10",
-    "observation_time": "00:05:00",
+    "observation_time": "2h",
     "declination": "-45d00m00s",
     "integration_time": 180.0,
     "flux_density": 1.0,

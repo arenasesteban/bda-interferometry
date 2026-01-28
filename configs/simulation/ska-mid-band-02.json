@@ -1,9 +1,10 @@
 {
-  "freq_min": 950.0,
-  "freq_max": 1760.0,
+  "freq_min": 950,
+  "freq_max": 1760,
   "n_chans": 50,
   "observation_time": "00:10:00",
   "declination": "-60d00m00s",
-  "integration_time": 180.0,
-  "source_path": "../pyralysis/examples/example_images/3c288.fits"
+  "integration_time": 480.0,
+  "spectral_index": 0.0,
+  "source_path": "./source/3c288.fits"
 }
