@@ -14,8 +14,8 @@ from astropy.coordinates import Angle
 import astropy.units as u
 from astropy.constants import c
 
-da.random.seed(777)
-np.random.seed(777)
+da.random.seed(42)
+np.random.seed(42)
 
 
 def load_antenna_configuration(antenna_config_path):
@@ -77,23 +77,40 @@ def configure_observation(interferometer, freq_min, freq_max, n_chans, observati
         if interferometer is None:
             raise ValueError("Interferometer cannot be None")
 
-        if date_string is None:
-            date_string = datetime.datetime.now().strftime("%Y-%m-%d")
-        
         # Create frequency array
-        freq = np.linspace(freq_min, freq_max, n_chans) * u.GHz
+        freq = np.linspace(freq_min, freq_max, n_chans)
+
+        if date_string is None:
+            freq = freq * u.MHz
+            date_string = datetime.datetime.now().strftime("%Y-%m-%d")
+
+            # Configure interferometer
+            interferometer.configure_observation(
+                frequencies=freq,
+                reference_time=Time(date_string, format='iso'),
+                observation_time=observation_time,
+                declination=Angle(declination),
+                frequency_step=None,
+                integration_time=integration_time * u.s,
+            )
+        
+        else:
+            freq = freq * u.GHz
+            step = (freq[1] - freq[0]).to(u.Hz).value
+            
+            # Configure interferometer
+            interferometer.configure_observation(
+                hour_angle="transit",
+                observation_time=observation_time,
+                declination=Angle(declination),
+                min_frequency=freq_min*1e9,
+                max_frequency=freq_max*1e9,
+                frequency_step=step,
+                integration_time=integration_time * u.s,
+            )
+        
         ref_freq = np.median(freq)
 
-        # Configure interferometer
-        interferometer.configure_observation(
-            frequencies=freq,
-            reference_time=Time(date_string, format='iso'),
-            observation_time=observation_time,
-            declination=Angle(declination),
-            frequency_step=None,
-            integration_time=integration_time * u.s,
-        )
-        
         return freq, ref_freq
     
     except Exception as e:
@@ -146,7 +163,7 @@ def generate_point_sources(ref_freq, source_path=None, freq=None, interferometer
             for i in range(n_sources):
                 source = PointSource(
                     reference_intensity=s_0,
-                    spectral_index=0.0,
+                    spectral_index=spectral_index,
                     reference_frequency=ref_freq,
                     direction_cosines=(l_0[i], m_0[i])
                 )
@@ -256,7 +273,7 @@ def generate_dataset(antenna_config_path,
 
     # Generate point sources
     if source_path is not None:
-        sources = generate_point_sources(ref_freq, source_path)
+        sources = generate_point_sources(ref_freq, source_path, spectral_index)
     
     else:
         sources = generate_point_sources(
