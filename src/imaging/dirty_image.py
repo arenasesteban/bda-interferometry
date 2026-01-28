@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from pathlib import Path
 
 
 def dataframe_to_grid(gridded_df, grid_config):
@@ -24,7 +23,6 @@ def dataframe_to_grid(gridded_df, grid_config):
 
 
 def generate_dirty_image(gridded_df, grid_config, dirty_image_output, psf_output):
-    print("Dataframe to grid conversion...")
     grids, weights = dataframe_to_grid(gridded_df, grid_config)
 
     img_size = grid_config["img_size"]
@@ -32,10 +30,9 @@ def generate_dirty_image(gridded_df, grid_config, dirty_image_output, psf_output
     imsize = [img_size, img_size]
     grid_size = [int(imsize[0] * padding_factor), int(imsize[1] * padding_factor)]
 
-    print("Generating dirty image via IFFT...")
     fourier = np.fft.ifftshift(grids * weights)
-    dirty_image = np.fft.ifft2(fourier, norm= 'forward')
-    dirty_image = np.fft.fftshift(np.abs(dirty_image))
+    dirty_image = np.fft.fft2(fourier, norm= 'forward')
+    dirty_image = np.fft.fftshift(dirty_image).real
 
     dirty_image = dirty_image * grid_size[0] * grid_size[1]
 
@@ -44,11 +41,8 @@ def generate_dirty_image(gridded_df, grid_config, dirty_image_output, psf_output
         start_y = (grid_size[1] - img_size) // 2
         dirty_image = dirty_image[start_x:start_x + img_size, start_y:start_y + img_size]
 
-    
-    print("Generating PSF image via IFFT...")
-
     fourier_psf = np.fft.ifftshift(weights)
-    psf_image = np.fft.ifft2(fourier_psf, norm= 'forward')
+    psf_image = np.fft.fft2(fourier_psf, norm= 'forward')
     psf_image = np.fft.fftshift(np.abs(psf_image))
 
     psf_image = psf_image * grid_size[0] * grid_size[1]
