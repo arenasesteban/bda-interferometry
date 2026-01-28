@@ -38,19 +38,31 @@ def apply_gridding(df, grid_config):
 def process_gridding(iterator, grid_config):
     accumulated_grid = {}
 
+    stats = {
+        'total_rows': 0,
+        'out_of_bounds': 0,
+        'gridded_points': 0,
+        'u_pix_range': [float('inf'), float('-inf')],
+        'v_pix_range': [float('inf'), float('-inf')]
+    }
+
     try:
         img_size = grid_config["img_size"]
         padding_factor = grid_config["padding_factor"]
         cellsize = grid_config["cellsize"]
 
         imsize = [img_size, img_size]
-        grid_size = [int(imsize[0] * padding_factor), int(imsize[1] * padding_factor)]
-        uvcellsize = [1 / (cellsize * grid_size[0]), 1 / (cellsize * grid_size[1])]
+        grid_size = [int(imsize[0] * padding_factor), int(imsize[1] * padding_factor)]  # [v_size, u_size]
+
+        du = - 1.0 / (cellsize * grid_size[1])  # u_direction (width)
+        dv = 1.0 / (cellsize * grid_size[0])    # v_direction (height)
+        uvcellsize = [du, dv]
 
         chan_freq = grid_config["chan_freq"]
         corrs_names = build_corr_map(grid_config["corrs_string"])
 
         for row in iterator:
+            stats['total_rows'] += 1
             u, v = row.u, row.v
             visibilities = row.visibilities
             weights = row.weight
@@ -62,12 +74,18 @@ def process_gridding(iterator, grid_config):
             for chan in range(n_channels):
                 freq = chan_freq[chan]
 
-                u_pix, v_pix = uv_to_grid_index(u, v, freq, uvcellsize, grid_size)
-                u_pix_h, v_pix_h = uv_to_grid_index(-u, -v, freq, uvcellsize, grid_size)
+                u_pix, v_pix = calculate_uv_pix(u, v, freq, uvcellsize, grid_size)
+                u_pix_h, v_pix_h = calculate_uv_pix(-u, -v, freq, uvcellsize, grid_size)
 
-                if u_pix < 0 or v_pix < 0 or u_pix >= grid_size[0] or v_pix >= grid_size[1]:
+                stats['u_pix_range'][0] = min(stats['u_pix_range'][0], u_pix)
+                stats['u_pix_range'][1] = max(stats['u_pix_range'][1], u_pix)
+                stats['v_pix_range'][0] = min(stats['v_pix_range'][0], v_pix)
+                stats['v_pix_range'][1] = max(stats['v_pix_range'][1], v_pix)
+
+                if u_pix < 0 or v_pix < 0 or u_pix >= grid_size[1] or v_pix >= grid_size[0]:
+                    stats['out_of_bounds'] += 1
                     continue
-                if u_pix_h < 0 or v_pix_h < 0 or u_pix_h >= grid_size[0] or v_pix_h >= grid_size[1]:
+                if u_pix_h < 0 or v_pix_h < 0 or u_pix_h >= grid_size[1] or v_pix_h >= grid_size[0]:
                     continue
 
                 for corr in range(n_correlations):
@@ -85,45 +103,43 @@ def process_gridding(iterator, grid_config):
                     ws = weights[chan][corr] * 0.5
 
                     grid_key = (u_pix, v_pix)
-
-                    if grid_key not in accumulated_grid:
-                        accumulated_grid[grid_key] = {
-                            'vs_real': vs_complex.real * ws,
-                            'vs_imag': vs_complex.imag * ws,
-                            'weights': ws
-                        }
-                    else:
-                        accumulated_grid[grid_key]['vs_real'] += vs_complex.real * ws
-                        accumulated_grid[grid_key]['vs_imag'] += vs_complex.imag * ws
-                        accumulated_grid[grid_key]['weights'] += ws
-
                     grid_key_h = (u_pix_h, v_pix_h)
 
-                    if grid_key_h not in accumulated_grid:
-                        accumulated_grid[grid_key_h] = {
-                            'vs_real': vs_complex.real * ws,
-                            'vs_imag': -vs_complex.imag * ws,
-                            'weights': ws
-                        }
-                    else:
-                        accumulated_grid[grid_key_h]['vs_real'] += vs_complex.real * ws
-                        accumulated_grid[grid_key_h]['vs_imag'] += -vs_complex.imag * ws
-                        accumulated_grid[grid_key_h]['weights'] += ws
+                    accumulate_grid(accumulated_grid, grid_key, vs_complex, ws)
+                    accumulate_grid(accumulated_grid, grid_key_h, np.conj(vs_complex), ws)
+    
+        print(f"[Gridding] Rows: {stats['total_rows']} | Gridded: {stats['gridded_points']} | Out: {stats['out_of_bounds']}")
+        print(f"[Gridding] u_pix: [{stats['u_pix_range'][0]:.0f}, {stats['u_pix_range'][1]:.0f}] (grid: 0-{grid_size[1]-1})")
+        print(f"[Gridding] v_pix: [{stats['v_pix_range'][0]:.0f}, {stats['v_pix_range'][1]:.0f}] (grid: 0-{grid_size[0]-1})")
             
         if accumulated_grid:
             for (u_pix, v_pix), values in accumulated_grid.items():
                 yield (
                     int(u_pix),
                     int(v_pix),
-                    values['vs_real'],
-                    values['vs_imag'],
-                    values['weights']
+                    float(values['vs_real']),
+                    float(values['vs_imag']),
+                    float(values['weights'])
                 )
 
     except Exception as e:
         print(f"Error processing rows for gridding: {e}")
         traceback.print_exc()
         raise
+
+
+def accumulate_grid(grid, key, visibility, weight):
+    if key not in grid:
+        grid[key] = {
+            'vs_real': visibility.real * weight,
+            'vs_imag': visibility.imag * weight,
+            'weights': weight
+        }
+    else:
+        grid[key]['vs_real'] += visibility.real * weight
+        grid[key]['vs_imag'] += visibility.imag * weight
+        grid[key]['weights'] += weight
+    return grid[key]
 
 
 def build_corr_map(corrs_string):
@@ -137,11 +153,11 @@ def build_corr_map(corrs_string):
     return {idx: corr for idx, corr in enumerate(corrs)}
 
 
-def uv_to_grid_index(u, v, freq, uvcellsize, grid_size):
-    u_lambda, v_lambda = u * (freq / c.value), v * (freq / c.value)
+def calculate_uv_pix(u, v, freq, uvcellsize, grid_size):
+    u_lambda, v_lambda = u * freq / c.value, v * freq / c.value
 
-    u_pix = math.floor((u_lambda / uvcellsize[0]) + (grid_size[0] // 2) + 0.5)
-    v_pix = math.floor((v_lambda / uvcellsize[1]) + (grid_size[1] // 2) + 0.5)
+    u_pix = math.floor((u_lambda / uvcellsize[0]) + (grid_size[1] // 2) + 0.5)
+    v_pix = math.floor((v_lambda / uvcellsize[1]) + (grid_size[0] // 2) + 0.5)
 
     return u_pix, v_pix
 
