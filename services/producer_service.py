@@ -15,6 +15,7 @@ from pathlib import Path
 import argparse
 import traceback
 from astropy.constants import c
+import astropy.units as u
 
 # Kafka imports
 from kafka import KafkaProducer
@@ -31,6 +32,9 @@ sys.path.append(str(src_path))
 
 from data.simulation import generate_dataset
 from data.extraction import stream_subms_chunks
+
+# Supported padding strategies
+PADDING_STRATEGY = ["FIXED", "DERIVED"]
 
 
 def load_simulation_config(config_path):
@@ -113,8 +117,16 @@ def update_grid_config(config_path, theo_resolution, corrs_string, chan_freq):
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
+
+        if config.get('cellsize_strategy') not in PADDING_STRATEGY:
+            raise ValueError(f"Invalid cellsize_strategy. Supported strategies: {PADDING_STRATEGY}")
         
-        config['cellsize'] = (theo_resolution / 7)
+        if config['cellsize_strategy'] == "DERIVED":
+            config['cellsize'] = theo_resolution / 7
+        elif config['cellsize_strategy'] == "FIXED" and config.get('cellsize_flag', True):
+            config['cellsize'] = (config['cellsize'] * u.arcsec).to(u.rad).value
+            config['cellsize_flag'] = False
+
         config['corrs_string'] = corrs_string
         config['chan_freq'] = chan_freq
 
@@ -457,6 +469,7 @@ def run_producer_service(antenna_config_path, simulation_config_path, topic):
                 observation_time=sim_config["observation_time"],
                 declination=sim_config["declination"],
                 integration_time=sim_config["integration_time"],
+                spectral_index=sim_config["spectral_index"],
                 source_path=sim_config["source_path"]
             )
         else:
