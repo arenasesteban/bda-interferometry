@@ -16,8 +16,8 @@ def dataframe_to_grid(gridded_df, grid_config):
     for row in rows:
         u = row.u_pix
         v = row.v_pix
-        grids[v, u] += row.vs_real + 1j * row.vs_imag
-        weights[v, u] += row.weights
+        grids[v, u] += row.real + 1j * row.imag
+        weights[v, u] += row.weight
 
     return grids * 0.5, weights
 
