@@ -17,12 +17,14 @@ def get_chunk_size(vs_set):
         Chunk size.
     """
     try:
+        MAX_CHUNK_SIZE = 1000
+
         chunks = vs_set.data.data.chunks[0]
 
         if len(chunks) > 1:
-            return chunks[0]
+            return min(chunks[0], MAX_CHUNK_SIZE)
         else:
-            return min(1000, vs_set.nrows)
+            return min(MAX_CHUNK_SIZE, vs_set.nrows)
 
     except Exception as e:
         print(f"Error getting chunk size: {e}")
@@ -197,6 +199,8 @@ def extract_subms_chunks(subms):
         n_correlations = vs_set.data.shape[2]
 
         chunk_size = get_chunk_size(vs_set)
+
+        print("[DEBUG] Chunk size:", chunk_size)
 
         chunk_id = 0
         for start_row in range(0, nrows, chunk_size):

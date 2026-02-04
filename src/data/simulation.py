@@ -273,16 +273,20 @@ def generate_dataset(antenna_config_path,
 
     # Generate point sources
     if source_path is not None:
-        sources = generate_point_sources(ref_freq, source_path, spectral_index)
+        sources = generate_point_sources(
+            ref_freq=ref_freq, 
+            source_path=source_path, 
+            spectral_index=spectral_index
+        )
     
     else:
         sources = generate_point_sources(
-            ref_freq,
-            source_path,
-            freq,
-            interferometer,
-            flux_density,
-            spectral_index,
+            ref_freq=ref_freq,
+            source_path=source_path,
+            freq=freq,
+            interferometer=interferometer,
+            flux_density=flux_density,
+            spectral_index=spectral_index,
         )
 
     # Create composite source model
