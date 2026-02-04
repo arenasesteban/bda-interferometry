@@ -219,8 +219,8 @@ def create_kafka_producer(kafka_servers=None, **kwargs):
         'linger_ms': 150,
 
         # Buffer sizes
-        'max_request_size': 10485760,  # 10 MB
-        'buffer_memory': 33554432,  # 32 MB
+        'max_request_size': 25000000,  # 25 MB
+        'buffer_memory': 67108864,  # 64 MB
 
         # Reliability settings
         'enable_idempotence': True,
@@ -255,9 +255,9 @@ def create_kafka_producer(kafka_servers=None, **kwargs):
         raise
 
 
-def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enable_warmup):
+def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enable_warmup, num_partitions=None):
     """
-    Stream chunks of data to Kafka.
+    Stream chunks of data to Kafka with round-robin distribution.
 
     Parameters
     ----------
@@ -271,6 +271,8 @@ def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enabl
         Base delay between sending chunks (in seconds).
     enable_warmup : bool
         Whether to enable warmup period for initial chunks.
+    num_partitions : int, optional
+        Number of Kafka partitions (for logging/stats only).
 
     Returns
     -------
@@ -293,22 +295,28 @@ def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enabl
     # Simple metrics tracking
     total_chunks = 0
     failed_chunks = 0
-    send_times = []  # Store recent send times for averaging
-    max_send_times_window = 50  # Keep last 50 send times
+    send_times = []
+    max_send_times_window = 50
+    
+    # Track distribution across partitions
+    partition_distribution = {}
 
     try:
         for chunk in stream_subms_chunks(dataset):
             chunk_start_time = time.time()
-            key = f"{chunk['subms_id']}_{chunk['chunk_id']}"
+            
+            key = None 
+            
+            chunk_id = f"{chunk['subms_id']}_{chunk['chunk_id']}"
             total_chunks += 1
             
-            try:                
+            try:
                 # Non-blocking send
                 future = producer.send(topic, value=chunk, key=key)
                 pending_futures.append({
                     'future': future,
                     'start_time': chunk_start_time,
-                    'key': key
+                    'chunk_id': chunk_id
                 })
                 
                 # Clean up completed futures and measure send times
@@ -317,19 +325,23 @@ def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enabl
                     if pending['future'].is_done:
                         completed_futures.append(pending)
                         try:
-                            pending['future'].get(timeout=0.1)
+                            record_metadata = pending['future'].get(timeout=0.1)
+                            
+                            # Track partition distribution
+                            partition = record_metadata.partition
+                            partition_distribution[partition] = partition_distribution.get(partition, 0) + 1
                             
                             # Record successful send time
                             send_time_ms = (time.time() - pending['start_time']) * 1000
                             send_times.append(send_time_ms)
-                            print(f"✓ Sending chunk: {key} - {send_time_ms:.2f} ms")
+                            print(f"✓ Chunk {pending['chunk_id']} → partition {partition} - {send_time_ms:.2f} ms")
 
                             # Keep only recent send times
                             if len(send_times) > max_send_times_window:
                                 send_times.pop(0)
                         except KafkaError as e:
                             failed_chunks += 1
-                            print(f"✗ Error sending chunk {pending['key']}: {e}")
+                            print(f"✗ Error sending chunk {pending['chunk_id']}: {e}")
                 
                 # Remove completed futures
                 pending_futures = [p for p in pending_futures if p not in completed_futures]
@@ -342,7 +354,7 @@ def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enabl
                 
                 # 1. Too many pending futures
                 if len(pending_futures) > MAX_PENDING_FUTURES:
-                    current_delay = min(current_delay * 1.2, 1.0)  # Max 1s delay
+                    current_delay = min(current_delay * 1.2, 1.0)
                     backpressure_triggered = True
                     print(f"Backpressure: Too many pending futures ({len(pending_futures)})")
                 
@@ -376,7 +388,7 @@ def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enabl
                 
             except Exception as e:
                 failed_chunks += 1
-                print(f"Error processing chunk {key}: {e}")
+                print(f"Error processing chunk {chunk_id}: {e}")
                 continue
 
     except Exception as e:
@@ -389,13 +401,16 @@ def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enabl
         if pending_futures:
             for pending in pending_futures:
                 try:
-                    pending['future'].get(timeout=10)
+                    record_metadata = pending['future'].get(timeout=10)
+                    partition = record_metadata.partition
+                    partition_distribution[partition] = partition_distribution.get(partition, 0) + 1
+                    
                     send_time_ms = (time.time() - pending['start_time']) * 1000
                     send_times.append(send_time_ms)
-                    print(f"✓ Final chunk: {pending['key']} sent")
+                    print(f"✓ Final chunk: {pending['chunk_id']} → partition {partition}")
                 except KafkaError as e:
                     failed_chunks += 1
-                    print(f"✗ Final chunk {pending['key']}: FAILED - {e}")
+                    print(f"✗ Final chunk {pending['chunk_id']}: FAILED - {e}")
         
         # Final flush
         producer.flush(timeout=5)
@@ -404,16 +419,17 @@ def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enabl
         sent_chunks = total_chunks - failed_chunks
         avg_send_time_final = sum(send_times) / len(send_times) if send_times else 0
 
-        print("\n[Producer] Sending END_OF_STREAM signal...")
+        print("\n[Producer] Sending END signal...")
         control_message = {
-            'message_type': 'END_OF_STREAM',
+            'message_type': 'END',
             'timestamp': time.time(),
             'total_chunks': total_chunks,
             'sent_chunks': sent_chunks,
-            'failed_chunks': failed_chunks
+            'failed_chunks': failed_chunks,
+            'partition_distribution': partition_distribution
         }
         
-        producer.send(topic, value=control_message, key=b"__CONTROL__").get(timeout=10)
+        producer.send(topic, value=control_message, key="__CONTROL__").get(timeout=10)
 
         producer.flush(timeout=5)
         print("[PRODUCER] ✓ END_OF_STREAM signal sent")
@@ -424,12 +440,21 @@ def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enabl
         print(f"Failed: {failed_chunks}")
         print(f"Average send time: {avg_send_time_final:.2f}ms")
         
+        # Show partition distribution
+        if partition_distribution:
+            print(f"\n=== Partition Distribution ===")
+            for partition in sorted(partition_distribution.keys()):
+                count = partition_distribution[partition]
+                percentage = (count / sent_chunks * 100) if sent_chunks > 0 else 0
+                print(f"Partition {partition}: {count} chunks ({percentage:.1f}%)")
+        
     return {
         'total_chunks': total_chunks,
         'failed_chunks': failed_chunks,
         'sent_chunks': sent_chunks,
         'average_send_time_ms': avg_send_time_final,
-        'send_times': send_times
+        'send_times': send_times,
+        'partition_distribution': partition_distribution
     }
 
 
