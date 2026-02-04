@@ -9,27 +9,33 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import (
     StructType, StructField, DoubleType, IntegerType
 )
+import pandas as pd
 
 from .weighting_schemes import apply_weighting
 
 
-def apply_gridding(df, grid_config):
+def apply_gridding(df_scientific, num_partitions, grid_config, strategy="PARTIAL"):
     try:
-        scientific_df = df.repartition(4, F.col("baseline_key"), F.col("scan_number"))
+        if strategy == "PARTIAL":
+            # Micro-batching gridding
+            df_duplicated = prepare_gridding(df_scientific)
+            
+            df_repartitioned = df_duplicated.repartition(num_partitions * 2, "u", "v")
 
-        def grid_data(iterator):
-            return process_gridding(iterator, grid_config)
+            df_gridded = accumulate_grid(df_repartitioned, grid_config)
 
-        gridded = scientific_df.rdd.mapPartitions(grid_data)
-        gridded_rdd = df.sparkSession.createDataFrame(gridded, define_grid_schema())
+            return df_gridded
+        elif strategy == "COMPLETE":
+            # Streaming finished, apply weighting and consolidation
+            df_repartitioned = df_scientific.repartition(num_partitions * 2, "u_pix", "v_pix")
+            
+            df_gridded = apply_weighting(df_repartitioned, grid_config)
 
-        gridded_acc = gridded_rdd.groupBy("u_pix", "v_pix").agg(
-            F.sum("real").alias("real"),
-            F.sum("imag").alias("imag"),
-            F.sum("weight").alias("weight")
-        )
-        
-        return gridded_acc
+            df_gridded = df_gridded.coalesce(num_partitions)
+            
+            return df_gridded
+        else:
+            raise ValueError(f"Unknown gridding strategy: {strategy}")
 
     except Exception as e:
         print(f"Error during gridding: {e}")
@@ -37,114 +43,136 @@ def apply_gridding(df, grid_config):
         raise
 
 
-def process_gridding(iterator, grid_config):
+def prepare_gridding(scientific_df):
+    df_original = scientific_df.select(
+        F.col("baseline_key"),
+        F.col("u"),
+        F.col("v"),
+        F.col("n_channels"),
+        F.col("n_correlations"),
+        F.col("visibilities"),
+        F.col("weight"),
+        F.col("flag"),
+        F.lit(False).alias("is_hermitian")
+    )
+
+    df_hermitian = scientific_df.select(
+        F.col("baseline_key"),
+        (-F.col("u")).alias("u"),
+        (-F.col("v")).alias("v"),
+        F.col("n_channels"),
+        F.col("n_correlations"),
+        F.col("visibilities"),
+        F.col("weight"),
+        F.col("flag"),
+        F.lit(True).alias("is_hermitian")
+    )
+
+    df_duplicated = df_original.unionByName(df_hermitian)
+
+    return df_duplicated
+
+def accumulate_grid(scientific_df, grid_config):
     try:
-        accumulated_grid = {}
+        schema = StructType([
+            StructField("u_pix", IntegerType(), True),
+            StructField("v_pix", IntegerType(), True),
+            StructField("vs_real", DoubleType(), True),
+            StructField("vs_imag", DoubleType(), True),
+            StructField("weight", DoubleType(), True)
+        ])
 
-        def accumulate_visibilities(u_pix, v_pix, u_pix_h, v_pix_h, vs, ws):
+        def asign_pixels(pdf):
+            img_size = grid_config["img_size"]
+            padding_factor = grid_config["padding_factor"]
+            cellsize = grid_config["cellsize"]
+            chan_freq = grid_config["chan_freq"]
+            corrs_string = grid_config["corrs_string"]
 
-            grid_key = (u_pix, v_pix)
-            grid_key_h = (u_pix_h, v_pix_h)
+            padded_size = int(img_size * padding_factor)  # [v_size, u_size]
+            du = - 1.0 / (cellsize * padded_size)  # u_direction (width)
+            dv = 1.0 / (cellsize * padded_size)    # v_direction (height)
+            uvcellsize = [du, dv]
+            corrs_map = build_corrs_map(corrs_string)
 
-            accumulate_grid(accumulated_grid, grid_key, vs, ws)
-            accumulate_grid(accumulated_grid, grid_key_h, np.conj(vs), ws)
+            accumulate_pixels = []
 
-        process_visibilities(iterator, grid_config, accumulate_visibilities)
-        weighted_grid = apply_weighting(accumulated_grid, grid_config)
+            for index, row in pdf.iterrows():
+                result = process_visibility(row, chan_freq, corrs_map, uvcellsize, padded_size)
+                
+                if result is not None:
+                    accumulate_pixels.extend(result)
 
-        if weighted_grid:
-            for (u_pix, v_pix), values in weighted_grid.items():
-                yield (
-                    int(u_pix),
-                    int(v_pix),
-                    float(values['real']),
-                    float(values['imag']),
-                    float(values['weight'])
-                )
+            return pd.DataFrame(accumulate_pixels, columns=["u_pix", "v_pix", "vs_real", "vs_imag", "weight"])
+        
+        df_accumulated = scientific_df.groupBy("baseline_key").applyInPandas(asign_pixels, schema)
+
+        return df_accumulated
 
     except Exception as e:
-        print(f"[Gridding] Error processing gridded data: {e}")
+        print(f"Error during grid accumulation: {e}")
         traceback.print_exc()
         raise
 
 
-def process_visibilities(iterator, grid_config, accumulate_visibilities):
+def process_visibility(row, chan_freq, corrs_map, uvcellsize, padded_size):
     try:
-        img_size = grid_config["img_size"]
-        padding_factor = grid_config["padding_factor"]
-        cellsize = grid_config["cellsize"]
-        chan_freq = grid_config["chan_freq"]
-        corrs_string = grid_config["corrs_string"]
+        u, v = row.u, row.v
+        visibilities = row.visibilities
+        weights = row.weight
+        flags = row.flag
+        
+        n_channels = row.n_channels
+        n_correlations = row.n_correlations
+        is_hermitian = row.is_hermitian
 
-        grid_size = [int(img_size * padding_factor), int(img_size * padding_factor)]  # [v_size, u_size]
-        du = - 1.0 / (cellsize * grid_size[1])  # u_direction (width)
-        dv = 1.0 / (cellsize * grid_size[0])    # v_direction (height)
-        uvcellsize = [du, dv]
-        corrs_string = build_corr_map(corrs_string)
+        pixels = []
 
-        for row in iterator:
-            u, v = row.u, row.v
-            visibilities = row.visibilities
-            weights = row.weight
-            flags = row.flag
-            
-            n_channels = row.n_channels
-            n_correlations = row.n_correlations
+        for chan in range(n_channels):
+            freq = chan_freq[chan]
 
-            for chan in range(n_channels):
-                freq = chan_freq[chan]
+            u_pix, v_pix = calculate_uv_pix(u, v, freq, uvcellsize, padded_size)
 
-                u_pix, v_pix = calculate_uv_pix(u, v, freq, uvcellsize, grid_size)
-                u_pix_h, v_pix_h = calculate_uv_pix(-u, -v, freq, uvcellsize, grid_size)
+            if not is_valid_uv_pix(u_pix, v_pix, padded_size):
+                continue
 
-                if not is_valid_uv_pix(u_pix, v_pix, grid_size):
+            for corr in range(n_correlations):
+                if flags[chan][corr]:
                     continue
-                if not is_valid_uv_pix(u_pix_h, v_pix_h, grid_size):
+
+                corr_name = corrs_map[corr]
+                if corr_name not in {'XX', 'YY', 'RR', 'LL'}:
                     continue
 
-                for corr in range(n_correlations):
-                    if flags[chan][corr]:
-                        continue
+                vs = complex(visibilities[chan][corr][0], visibilities[chan][corr][1])
+                ws = weights[chan][corr] * 0.5
 
-                    corr_name = corrs_string[corr]
-                    if corr_name not in {'XX', 'YY', 'RR', 'LL'}:
-                        continue
+                if is_hermitian:
+                    vs = np.conj(vs)
 
-                    vs = complex(visibilities[chan][corr][0], visibilities[chan][corr][1])
-                    ws = weights[chan][corr] * 0.5
+                pixels.append({
+                    'u_pix': int(u_pix),
+                    'v_pix': int(v_pix),
+                    'vs_real': float(vs.real),
+                    'vs_imag': float(vs.imag),
+                    'weight': float(ws)
+                })
 
-                    accumulate_visibilities(u_pix, v_pix, u_pix_h, v_pix_h, vs, ws)
-    
+        return pixels   
+
     except Exception as e:
-        print(f"[Gridding] Error processing visibilities: {e}")
+        print(f"Error processing visibility: {e}")
         traceback.print_exc()
         raise
 
 
-def accumulate_grid(grid, key, visibility, weight):
+def calculate_uv_pix(u, v, freq, uvcellsize, padded_size):
     try:
-        if key not in grid:
-            grid[key] = {
-                'visibilities': [visibility],
-                'weights': [weight],
-            }
-        else:
-            grid[key]['visibilities'].append(visibility)
-            grid[key]['weights'].append(weight)
-        return grid[key]
-    
-    except Exception as e:
-        print(f"[Gridding] Error accumulating grid data: {e}")
-        traceback.print_exc()
-        raise
-
-
-def calculate_uv_pix(u, v, freq, uvcellsize, grid_size):
-    try:
+        """ u_lambda, v_lambda = u / (c.value / freq), v / (c.value / freq) """
         u_lambda, v_lambda = u * freq / c.value, v * freq / c.value
 
-        u_pix = math.floor((u_lambda / uvcellsize[0]) + (grid_size[1] // 2) + 0.5)
-        v_pix = math.floor((v_lambda / uvcellsize[1]) + (grid_size[0] // 2) + 0.5)
+        u_pix = math.floor((u_lambda / uvcellsize[0]) + (padded_size // 2) + 0.5)
+        v_pix = math.floor((v_lambda / uvcellsize[1]) + (padded_size // 2) + 0.5)
 
         return u_pix, v_pix
     
@@ -154,9 +182,9 @@ def calculate_uv_pix(u, v, freq, uvcellsize, grid_size):
         raise
 
 
-def is_valid_uv_pix(u_pix, v_pix, grid_size):
+def is_valid_uv_pix(u_pix, v_pix, padded_size):
     try:
-        return 0 <= u_pix < grid_size[1] and 0 <= v_pix < grid_size[0]
+        return 0 <= u_pix < padded_size and 0 <= v_pix < padded_size
     
     except Exception as e:
         print(f"[Gridding] Error validating UV pixel coordinates: {e}")
@@ -164,7 +192,7 @@ def is_valid_uv_pix(u_pix, v_pix, grid_size):
         raise
 
 
-def build_corr_map(corrs_string):
+def build_corrs_map(corrs_string):
     try:
         if isinstance(corrs_string, list):
             corrs = corrs_string[0] if isinstance(corrs_string[0], list) else corrs_string
@@ -199,16 +227,6 @@ def load_grid_config(config_path):
         print(f"[Gridding] Error loading grid config: {e}")
         traceback.print_exc()
         raise
-
-
-def define_grid_schema():
-    return StructType([
-        StructField("u_pix", IntegerType(), True),
-        StructField("v_pix", IntegerType(), True),
-        StructField("real", DoubleType(), True),
-        StructField("imag", DoubleType(), True),
-        StructField("weight", DoubleType(), True)
-    ])
 
 
 def consolidate_gridding(gridded_rdd):

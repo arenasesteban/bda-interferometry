@@ -115,18 +115,23 @@ def average_by_window(df):
             StructField('field_id', IntegerType(), True),
             StructField('spw_id', IntegerType(), True),
             StructField('polarization_id', IntegerType(), True),
+
             StructField('n_channels', IntegerType(), True),
             StructField('n_correlations', IntegerType(), True),
+
             StructField('antenna1', IntegerType(), True),
             StructField('antenna2', IntegerType(), True),
             StructField('baseline_key', StringType(), True),
             StructField('scan_number', IntegerType(), True),
             StructField('window_id', IntegerType(), True),
-            StructField('time', DoubleType(), True),
-            StructField('interval', DoubleType(), True),
+
             StructField('exposure', DoubleType(), True),
+            StructField('interval', DoubleType(), True),
+            StructField('time', DoubleType(), True),
+
             StructField('u', DoubleType(), True),
             StructField('v', DoubleType(), True),
+            
             StructField('visibilities', ArrayType(ArrayType(ArrayType(DoubleType()))), True),
             StructField('weight', (ArrayType(ArrayType(DoubleType()))), True),
             StructField('flag', ArrayType(ArrayType(IntegerType())), True)
@@ -159,7 +164,6 @@ def average_by_window(df):
                 vs_list, ws_list, fs_list = [], [], []
 
                 for i in range(n):
-
                     vs_data = pdf.iloc[i]['visibilities']
                     ws_data = pdf.iloc[i]['weight']
                     fs_data = pdf.iloc[i]['flag']
@@ -215,30 +219,30 @@ def average_by_window(df):
         raise
 
 
-def process_rows(df, bda_config):
+def process_rows(df_scientific, bda_config):
     """
     Process rows for baseline-dependent averaging (BDA).
 
     Parameters
     ----------
-    df : pyspark.sql.DataFrame
+    df_scientific : pyspark.sql.DataFrame
         Input DataFrame with necessary columns.
     bda_config : dict
         Configuration dictionary with BDA parameters.
     
     Returns
     -------
-    pyspark.sql.DataFrame
-        Processed DataFrame after applying BDA.
+    tuple of pyspark.sql.DataFrame
+        Processed DataFrames after applying BDA.
     """
     try:
         decorr_factor = bda_config.get('decorr_factor', 0.95)
         fov = bda_config.get('fov', 0.01)
 
-        df_windowed = assign_temporal_window(df, decorr_factor, fov)
-        df_avg = average_by_window(df_windowed)
+        df_windowed = assign_temporal_window(df_scientific, decorr_factor, fov)
+        df_averaged = average_by_window(df_windowed)
 
-        return df_avg
+        return df_averaged, df_windowed
 
     except Exception as e:
         print(f"Error processing rows for bda: {e}")

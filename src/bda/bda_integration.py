@@ -1,18 +1,18 @@
 import traceback
 
-from pyspark.sql.functions import col
-
 from .bda_processor import process_rows
 
 
-def apply_bda(df, bda_config):
+def apply_bda(df_scientific, num_partitions, bda_config):
     """
     Apply Baseline Dependent Averaging (BDA) to the input DataFrame.
     
     Parameters
     ----------
-    df : pyspark.sql.DataFrame
+    df_scientific : pyspark.sql.DataFrame
         Input DataFrame containing visibility data.
+    num_partitions : int
+        Number of partitions for parallel processing.
     bda_config : dict
         Configuration parameters for BDA processing.
 
@@ -23,14 +23,16 @@ def apply_bda(df, bda_config):
     """
     try:        
         # Partition by baseline for streaming
-        partitioned_df = df.repartition(col("baseline_key"), col("scan_number"))
-        
-        # Sort within partitions by time
-        sorted_df = partitioned_df.sortWithinPartitions("baseline_key", "scan_number", "time")
-        
-        bda_df = process_rows(sorted_df, bda_config)
+        df_partitioned = df_scientific.repartition(num_partitions * 2, "baseline_key")
 
-        return bda_df
+        # Sort within partitions by time
+        df_sorted = df_partitioned.sortWithinPartitions("baseline_key", "scan_number", "time")
+        
+        df_averaged, df_windowed = process_rows(df_sorted, bda_config)
+
+        df_averaged = df_averaged.coalesce(num_partitions)
+
+        return df_averaged, df_windowed
 
     except Exception as e:
         print(f"BDA processing failed: {e}")
