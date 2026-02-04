@@ -14,13 +14,14 @@ import numpy as np
 import zlib
 import uuid
 from functools import reduce
+import logging
 
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     StringType, StructType, StructField, IntegerType,
-    DoubleType, ArrayType
+    DoubleType, ArrayType, BooleanType
 )
-from pyspark.sql.functions import col
+from pyspark.sql.functions import col, decode, trim
 from pyspark.sql import DataFrame
 
 # Add src directory to path
@@ -30,8 +31,9 @@ sys.path.append(str(src_path))
 
 from bda.bda_config import load_bda_config
 from bda.bda_integration import apply_bda
-from imaging.gridding import apply_gridding, load_grid_config, consolidate_gridding
+from imaging.gridding import apply_gridding, load_grid_config
 from imaging.dirty_image import generate_dirty_image
+from evaluation.metrics import calculate_metrics, consolidate_metrics
 
 
 def define_visibility_schema():
@@ -343,7 +345,7 @@ def deserialize_chunk_to_rows(iterator):
     return iter(all_rows)
 
 
-def process_streaming_batch(df, epoch_id, bda_config, grid_config):  
+def process_streaming_batch(df_scientific, num_partitions, epoch_id, bda_config, grid_config):  
     """
     Process a microbatch of visibility data.
 
@@ -353,6 +355,8 @@ def process_streaming_batch(df, epoch_id, bda_config, grid_config):
         Spark DataFrame containing visibility data for the microbatch.
     epoch_id : int
         Unique identifier for the microbatch.
+    num_partitions : int
+        Number of partitions for parallel processing.
     bda_config : dict
         Configuration for the BDA processing.
     grid_config : dict
@@ -366,41 +370,37 @@ def process_streaming_batch(df, epoch_id, bda_config, grid_config):
     start_time = time.time()
     
     try:       
-        row_count = df.count()
+        row_count = df_scientific.count()
         
         if row_count == 0:
-            print(f"[Batch {epoch_id}] Empty batch, skipping")
             return None
         
-        # Collect chunk statistics
-        chunk_stats = df.select("subms_id", "chunk_id", "nrows").distinct().collect()
-        total_chunks_rows = sum([row.nrows for row in chunk_stats])
-        
-        print(f"[Batch {epoch_id}] Processing {row_count} visibility rows")
-        print(f"[Batch {epoch_id}] Chunks detail:")
-        for stat in chunk_stats:
-            print(f"  - Chunk {stat.chunk_id}: {stat.nrows} rows")
-        print(f"[Batch {epoch_id}] Total rows from chunks: {total_chunks_rows}")
+        chunk = df_scientific.select("chunk_id").distinct().collect()
+
+        for c in chunk:
+            print(f"[Batch {epoch_id}] Processing CHUNK ID - {c['chunk_id']}")
         
         # BDA processing
-        """ bda_result = apply_bda(df, bda_config)
-        bda_count = bda_result.count()
+        df_averaged, df_windowed = apply_bda(df_scientific, num_partitions, bda_config)
         bda_time = (time.time() - start_time) * 1000
         print(f"[Batch {epoch_id}] BDA completed in {bda_time:.0f} ms")
-        print(f"[Batch {epoch_id}] BDA: {row_count} rows → {bda_count} rows") """
 
         # Gridding
-        grid_result = apply_gridding(df, grid_config)
+        df_grid = apply_gridding(df_averaged, num_partitions, grid_config, strategy="PARTIAL")
         total_time = (time.time() - start_time) * 1000
         print(f"[Batch {epoch_id}] Gridding completed in {total_time:.0f} ms")
         print(f"[Batch {epoch_id}] Total processing: {total_time:.0f} ms")
 
-        return grid_result
+        # Evalutation
+        df_amplitude, df_rms, df_baseline_dependency, df_cobertura_uv = calculate_metrics(df_windowed, df_averaged, num_partitions)
+
+        return df_grid, df_amplitude, df_rms, df_baseline_dependency, df_cobertura_uv
 
     except Exception as e:
         print(f"[ERROR] Batch {epoch_id}: {e}")
         traceback.print_exc()
         return None
+
 
 def normalize_baseline_key(antenna1, antenna2):
     """Normalize baseline key for consistent representation."""
@@ -426,10 +426,100 @@ def create_spark_session():
     
     spark.sparkContext.setLogLevel("WARN")
 
+    logging.getLogger("org.apache.spark.sql.kafka010").setLevel(logging.ERROR)
+
     print(f"[Spark] Master: {spark.sparkContext.master}")
     print(f"[Spark] App ID: {spark.sparkContext.applicationId}")
 
     return spark
+
+
+def create_kafka_stream(spark, bootstrap_server, topic):
+    """
+    Create and configure Kafka streaming DataFrame.
+    
+    Returns:
+        DataFrame: Configured Kafka stream
+    """
+    kafka_df = spark \
+        .readStream \
+        .format("kafka") \
+        .option("kafka.bootstrap.servers", bootstrap_server) \
+        .option("subscribe", topic) \
+        .option("startingOffsets", "earliest") \
+        .option("failOnDataLoss", "false") \
+        .option("maxOffsetsPerTrigger", "300") \
+        .load()
+    
+    return kafka_df.select(
+        kafka_df.key.alias("message_key"),
+        kafka_df.value.alias("chunk_data")
+    )
+
+
+def check_control_messages(df_scientific, epoch_id):
+    df_control = df_scientific.withColumn("key", trim(decode(col("message_key"), "UTF-8")))
+
+    end_signal = df_control.filter(col("key") == "__CONTROL__").limit(1).count() > 0
+    
+    print(f"[Batch {epoch_id}] ✓ Checked control messages - END_OF_STREAM: {end_signal}")
+
+    df_filtered = (df_control
+        .filter(col("key").isNull() | (col("key") != "__CONTROL__"))
+        .select("chunk_data")
+    )
+    
+    return df_filtered, end_signal
+
+def wait_for_stream_completion(query, max_idle_time=15, check_interval=2):
+    print("[Consumer] ✓ END_OF_STREAM received, waiting for active batches...")
+    
+    last_activity_time = time.time()
+    last_batch_id = -1
+    
+    while True:
+        time.sleep(check_interval)
+        
+        try:
+            last_progress = query.lastProgress
+            
+            if last_progress:
+                current_batch_id = last_progress.get('batchId', -1)
+
+                if current_batch_id != last_batch_id:
+                    last_batch_id = current_batch_id
+                    last_activity_time = time.time()
+                    num_rows = last_progress.get('numInputRows', 0)
+                    print(f"[Consumer] Processing batch {current_batch_id} ({num_rows} rows)...")
+
+            idle_time = time.time() - last_activity_time
+            if idle_time > max_idle_time:
+                print(f"[Consumer] ✓ No new batches for {idle_time:.1f}s - all data processed")
+                break
+                
+        except Exception as e:
+            print(f"[WARN] Error checking query status: {e}")
+            break
+
+
+def combine_and_image(grid, num_partitions, grid_config, dirty_output, psf_output):
+    if not grid:
+        print("[Imaging] No data to process")
+        return False
+    
+    print("\n[Imaging] Combining gridded visibilities...")
+    df_gridded = reduce(DataFrame.unionByName, grid)
+    
+    print("[Imaging] Applying final gridding...")
+    df_gridded = apply_gridding(df_gridded, num_partitions, grid_config, strategy="COMPLETE")
+    
+    print("[Imaging] Generating dirty image...")
+    generate_dirty_image(df_gridded, grid_config, dirty_output, psf_output)
+    
+    print(f"[Imaging] ✓ Dirty image saved to: {dirty_output}")
+    print(f"[Imaging] ✓ PSF image saved to: {psf_output}")
+    
+    return True
 
 
 def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, dirty_image_output, psf_output):
@@ -460,77 +550,40 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, dir
     print("=" * 80)
     
     spark = create_spark_session()
-    
-    try:        
-        kafka_df = spark \
-            .readStream \
-            .format("kafka") \
-            .option("kafka.bootstrap.servers", bootstrap_server) \
-            .option("subscribe", topic) \
-            .option("startingOffsets", "latest") \
-            .option("failOnDataLoss", "false") \
-            .option("maxOffsetsPerTrigger", "300") \
-            .load()
-        
-        # Configure Kafka DataFrame
-        kafka_processed = kafka_df.select(
-            kafka_df.key.alias("message_key"),
-            kafka_df.value.alias("chunk_data")
-        )
-        
-        visibility_row_schema = define_visibility_schema()
+    num_partitions = spark.sparkContext.defaultParallelism * 4 # 8 cores = 32 partitions
 
+    print(f"[Consumer] ✓ Spark session created with {spark.sparkContext.defaultParallelism} cores and {num_partitions} partitions")
+
+    try:        
         bda_config = load_bda_config(bda_config_path)
         grid_config = load_grid_config(grid_config_path)
+        visibility_schema = define_visibility_schema()
 
-        gridded_visibilities = []
-        stream_ended = False
-        last_batch_time = time.time()
+        kafka_stream = create_kafka_stream(spark, bootstrap_server, topic)
 
-        def process_batch(df, epoch_id):    
-            nonlocal stream_ended, last_batch_time
+        grid, amplitude, rms, baseline_dependency, cobertura_uv = [], [], [], [], []
+        stream_state = {'ended': False}
 
-            if df.isEmpty():
-                print(f"[Batch {epoch_id}] Empty, skipping")
+        def process_batch(df_scientific, epoch_id):    
+            df_filtered, stream_ended = check_control_messages(df_scientific, epoch_id)
+
+            if stream_ended:
+                stream_state['ended'] = True
+            if df_filtered.isEmpty():
+                print(f"[Batch {epoch_id}] Empty after filtering, skipping")
                 return
             
-            last_batch_time = time.time()
+            deserialized_rdd = df_filtered.rdd.mapPartitions(deserialize_chunk_to_rows)
+            deserialized_df = spark.createDataFrame(deserialized_rdd, visibility_schema)
 
-            control_messages = df.filter(
-                col("message_key").isNotNull() & 
-                col("message_key").cast("string").startswith("__CONTROL__")
-            ).collect()
-
-            if control_messages:
-                for msg in control_messages:
-                    try:
-                        control_data = msgpack.unpackb(msg.chunk_data, raw=False)
-                        if control_data.get('message_type') == 'END_OF_STREAM':
-                            print(f"\n[Batch {epoch_id}] ✓ Received END_OF_STREAM signal")
-                            stream_ended = True
-                    except Exception as e:
-                        print(f"[WARN] Error processing control message: {e}")
+            df_grid, df_amplitude, df_rms, df_baseline_dependency, df_cobertura_uv = process_streaming_batch(deserialized_df, num_partitions, epoch_id, bda_config, grid_config)
             
-            df = df.filter(
-                col("message_key").isNull() |
-                ~col("message_key").cast("string").startswith("__CONTROL__")
-            ).select("chunk_data")
-        
-            if df.isEmpty():
-                print(f"[Batch {epoch_id}] Only control messages, skipping")
-                return
-            
-            print("\n" + "=" * 80)
-            print(f"[Batch {epoch_id}] Starting processing")
-            print("=" * 80)
-
-            deserialized_rdd = df.rdd.mapPartitions(deserialize_chunk_to_rows)
-            deserialized_df = spark.createDataFrame(deserialized_rdd, visibility_row_schema)
-
-            grid_result = process_streaming_batch(deserialized_df, epoch_id, bda_config, grid_config)
-            
-            if grid_result is not None:
-                gridded_visibilities.append(grid_result)
+            if df_grid is not None:
+                grid.append(df_grid)
+                amplitude.append(df_amplitude)
+                rms.append(df_rms)
+                baseline_dependency.append(df_baseline_dependency)
+                cobertura_uv.append(df_cobertura_uv)
                 print(f"[Batch {epoch_id}] ✓ Completed successfully")
             else:
                 print(f"[Batch {epoch_id}] ✗ No output generated")
@@ -539,68 +592,38 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, dir
 
         checkpoint_path = f"/tmp/spark-bda-{uuid.uuid4().hex[:8]}-{int(time.time())}"
 
-        query = kafka_processed.writeStream \
+        query = kafka_stream.writeStream \
             .foreachBatch(process_batch) \
-            .trigger(processingTime='10 seconds') \
+            .trigger(processingTime="10 seconds") \
             .option("checkpointLocation", checkpoint_path) \
             .start()
 
         print("[Consumer] ✓ Streaming query started")
         print("[Consumer] Waiting for data...")
 
-        max_total_time = 300  # 5 minutes
-        check_interval = 2
-        start_time = time.time()
+        while query.isActive and not stream_state['ended']:
+            time.sleep(5)
 
-        while time.time() - start_time < max_total_time:
-            time.sleep(check_interval)
-            
-            if stream_ended:
-                print("[Consumer] ✓ END_OF_STREAM received, waiting for active batches...")
-                
-                max_idle_time = 15
-                last_activity_time = time.time()
-                last_batch_id = -1
-                
-                while True:
-                    time.sleep(check_interval)
-                    
-                    try:
-                        last_progress = query.lastProgress
-                        
-                        if last_progress:
-                            current_batch_id = last_progress.get('batchId', -1)
+        if query.isActive and stream_state['ended']:
+            query.stop()
 
-                            if current_batch_id != last_batch_id:
-                                last_batch_id = current_batch_id
-                                last_activity_time = time.time()
-                                num_rows = last_progress.get('numInputRows', 0)
-                                print(f"[Consumer] Processing batch {current_batch_id} ({num_rows} rows)...")
-
-                        idle_time = time.time() - last_activity_time
-                        if idle_time > max_idle_time:
-                            print(f"[Consumer] ✓ No new batches for {idle_time:.1f}s - all data processed")
-                            break
-                            
-                    except Exception as e:
-                        print(f"[WARN] Error checking query status: {e}")
-                        break
-                
-                break
-
+        query.awaitTermination()
+        
         print("[Consumer] Stopping query...")
-        query.stop()
 
-        if gridded_visibilities:
-            print("\n[Consumer] Combining gridded visibilities...")
-            gridded_visibilities_df = reduce(DataFrame.unionByName, gridded_visibilities)
-            final_gridded = consolidate_gridding(gridded_visibilities_df)
+        # Generate final image
+        if grid:
+            #combine_and_image(grid, num_partitions, grid_config, dirty_image_output, psf_output)
 
-            print("[Consumer] Generating dirty image...")
+            print("[Consumer] ✓ Combining evaluation metrics...")
+            df_amplitude = reduce(DataFrame.unionByName, amplitude)
+            df_rms = reduce(DataFrame.unionByName, rms)
+            df_baseline_dependency = reduce(DataFrame.unionByName, baseline_dependency)
+            df_cobertura_uv = reduce(DataFrame.unionByName, cobertura_uv)
+            
+            print("[Consumer] ✓ Generating evaluation metrics...")
 
-            generate_dirty_image(final_gridded, grid_config, dirty_image_output, psf_output)
-            print(f"[Consumer] ✓ Dirty image saved to: {dirty_image_output}")
-            print(f"[Consumer] ✓ PSF image saved to: {psf_output}")
+            consolidate_metrics(df_amplitude, df_rms, df_baseline_dependency, df_cobertura_uv, bda_config)
         else:
             print("[Consumer] No data processed, no image generated")
 
