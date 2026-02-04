@@ -1,29 +1,33 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import cmcrameri
 
 
-def dataframe_to_grid(gridded_df, grid_config):
+def dataframe_to_grid(df_gridded, grid_config):
     img_size = grid_config["img_size"]
     padding_factor = grid_config["padding_factor"]
     
-    imsize = [img_size, img_size]
-    u_size, v_size = int(imsize[0] * padding_factor), int(imsize[1] * padding_factor)
+    u_size, v_size = int(img_size * padding_factor), int(img_size * padding_factor)
+
+    pdf = df_gridded.toPandas()
+
+    u_coords, v_coords = pdf['u_pix'], pdf['v_pix']
+    vs_real, vs_imag = pdf['vs_real'], pdf['vs_imag']
+    weight = pdf['weight']
 
     grids = np.zeros((v_size, u_size), dtype=np.complex128)
     weights = np.zeros((v_size, u_size), dtype=np.float64)
 
-    rows = gridded_df.collect()
-    for row in rows:
-        u = row.u_pix
-        v = row.v_pix
-        grids[v, u] += row.real + 1j * row.imag
-        weights[v, u] += row.weight
+    grids[v_coords, u_coords] = vs_real + 1j * vs_imag
+    weights[v_coords, u_coords] = weight
 
-    return grids * 0.5, weights
+    grids *= 0.5
+
+    return grids, weights
 
 
-def generate_dirty_image(gridded_df, grid_config, dirty_image_output, psf_output):
-    grids, weights = dataframe_to_grid(gridded_df, grid_config)
+def generate_dirty_image(df_gridded, grid_config, dirty_image_output, psf_output):
+    grids, weights = dataframe_to_grid(df_gridded, grid_config)
 
     img_size = grid_config["img_size"]
     padding_factor = grid_config["padding_factor"]
@@ -53,23 +57,20 @@ def generate_dirty_image(gridded_df, grid_config, dirty_image_output, psf_output
 
 def save_dirty_image(dirty_image, output_file):
     plt.figure(figsize=(8, 8))
-    plt.imshow(dirty_image, cmap='hot', origin='lower')
-    plt.colorbar(label='Intensity')
-    plt.title('Dirty Image - BDA')
+    plt.imshow(dirty_image, cmap='cmc.acton', origin='lower')
+    plt.title('Dirty Image - BDA', fontdict={'fontsize': 16, 'fontweight': 'bold'})
     plt.xlabel('X [pixels]')
     plt.ylabel('Y [pixels]')
-    plt.tight_layout()
     plt.savefig(output_file)
     plt.close()
 
 
 def save_psf_image(psf_image, output_file):
     plt.figure(figsize=(8, 8))
-    plt.imshow(psf_image, cmap='hot', origin='lower')
+    plt.imshow(psf_image, cmap='cmc.acton', origin='lower')
     plt.colorbar(label='Intensity')
-    plt.title('Point Spread Function (PSF) - BDA')
+    plt.title('Point Spread Function (PSF) - BDA', fontdict={'fontsize': 16, 'fontweight': 'bold'})
     plt.xlabel('X [pixels]')
     plt.ylabel('Y [pixels]')
-    plt.tight_layout()
     plt.savefig(output_file)
     plt.close()
