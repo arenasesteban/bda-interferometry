@@ -54,7 +54,7 @@ def assign_temporal_window(df, decorr_factor, fov):
             phi_dot_arr[0] = np.nan
             sinc_arr[0] = np.nan
 
-            for i in range(1, n):                
+            for i in range(1, n):
                 u = pdf.loc[i, 'u']
                 v = pdf.loc[i, 'v']
 
@@ -164,7 +164,16 @@ def average_by_window(df):
                 vs_list, ws_list, fs_list = [], [], []
 
                 for i in range(n):
-                    vs_data = pdf.iloc[i]['visibilities']
+                    if pdf['baseline_key'].iloc[i] == '0-1':
+                        print("[Debug] Baseline:", pdf['baseline_key'].iloc[i])
+                        print("[Debug] Window ID:", pdf['window_id'].iloc[i])
+                        print("[Debug] UV Coords:", pdf['u'].iloc[i], pdf['v'].iloc[i])
+                        print("[Debug] Delta UV:", pdf['d_uv'].iloc[i])
+                        print("[Debug] Sinc Value:", pdf['sinc_value'].iloc[i])
+                        print("[Debug] Sinc Threshold:", pdf['sinc_value'].iloc[i] >= 0.95)
+                        print("-" * 60)
+
+                    vs_data = pdf.iloc[i]['visibility']
                     ws_data = pdf.iloc[i]['weight']
                     fs_data = pdf.iloc[i]['flag']
 

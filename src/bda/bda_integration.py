@@ -21,18 +21,23 @@ def apply_bda(df_scientific, num_partitions, bda_config):
     pyspark.sql.DataFrame
         DataFrame after applying BDA.
     """
-    try:        
-        # Partition by baseline for streaming
-        df_partitioned = df_scientific.repartition(num_partitions * 2, "baseline_key")
+    try:
+        if bda_config["decorr_factor"] < 1.0:
+            # Partition by baseline for streaming
+            df_partitioned = df_scientific.repartition(num_partitions * 2, "baseline_key")
 
-        # Sort within partitions by time
-        df_sorted = df_partitioned.sortWithinPartitions("baseline_key", "scan_number", "time")
+            # Sort within partitions by time
+            df_sorted = df_partitioned.sortWithinPartitions("baseline_key", "scan_number", "time")
+            
+            df_averaged, df_windowed = process_rows(df_sorted, bda_config)
+
+            df_averaged = df_averaged.coalesce(num_partitions)
+
+            return df_averaged, df_windowed
         
-        df_averaged, df_windowed = process_rows(df_sorted, bda_config)
-
-        df_averaged = df_averaged.coalesce(num_partitions)
-
-        return df_averaged, df_windowed
+        else:
+            # If no BDA is needed, return the original DataFrame
+            return df_scientific, None
 
     except Exception as e:
         print(f"BDA processing failed: {e}")
