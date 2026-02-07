@@ -47,235 +47,111 @@ def define_visibility_schema():
     """
     return StructType([
         StructField("subms_id", IntegerType(), True),
-        StructField("chunk_id", IntegerType(), True),
         StructField("field_id", IntegerType(), True),
         StructField("spw_id", IntegerType(), True),
         StructField("polarization_id", IntegerType(), True),
-
-        StructField("row_start", IntegerType(), True),
-        StructField("row_end", IntegerType(), True),
-        StructField("nrows", IntegerType(), True),
-
-        StructField("n_channels", IntegerType(), True),
-        StructField("n_correlations", IntegerType(), True),
-
+        StructField("chunk_id", IntegerType(), True),
+        
+        StructField("baseline_key", StringType(), True),
         StructField("antenna1", IntegerType(), True),
         StructField("antenna2", IntegerType(), True),
         StructField("scan_number", IntegerType(), True),
-        StructField("baseline_key", StringType(), True),
-
+        
         StructField("exposure", DoubleType(), True),
         StructField("interval", DoubleType(), True),
         StructField("time", DoubleType(), True),
+
+        StructField("n_channels", IntegerType(), True),
+        StructField("n_correlations", IntegerType(), True),
 
         StructField("u", DoubleType(), True),
         StructField("v", DoubleType(), True),
         StructField("w", DoubleType(), True),
 
-        StructField("visibilities", ArrayType(ArrayType(ArrayType(DoubleType()))), True),
+        StructField("visibility", ArrayType(ArrayType(ArrayType(DoubleType()))), True),
         StructField("weight", ArrayType(ArrayType(DoubleType())), True),
         StructField("flag", ArrayType(ArrayType(IntegerType())), True)
     ])
 
 
-def deserialize_array(field_dict, field_name, expected_shapes=None):
-    """
-    Deserialize a binary-encoded array from a dictionary.
-
-    Parameters
-    ----------
-    field_dict : dict
-        Dictionary containing 'type' and 'data' keys.
-    field_name : str
-        Name of the field being deserialized (for error messages).
-    expected_shapes : dict, optional
-        Expected shapes for different fields.
-    
-    Returns
-    -------
-    np.ndarray
-        Deserialized NumPy array.
-    """
-    try:
-        if not isinstance(field_dict, dict):
-            print(f"[WARN] {field_name} is not a dict: {type(field_dict)}")
-            return np.array([])
-        
-        if 'type' not in field_dict or 'data' not in field_dict:
-            print(f"[WARN] {field_name} missing keys: {field_dict.keys()}")
-            return np.array([])
-        
-        array_type = field_dict['type']
-        if array_type not in ['ndarray', 'ndarray_compressed']:
-            print(f"[WARN] {field_name} unsupported type: {array_type}")
-            return np.array([])
-        
-        binary_data = field_dict['data']
+def deserialize_array(array_data):
+    if isinstance(array_data, dict):
+        array_type = array_data.get('type')
         
         if array_type == 'ndarray_compressed':
-            try:
-                binary_data = zlib.decompress(binary_data)
-            except zlib.error as e:
-                print(f"[ERROR] Failed to decompress {field_name}: {e}")
-                return np.array([])
-
-        if 'visibilities' in field_name.lower():
-            array = np.frombuffer(binary_data, dtype=np.complex128)
-        elif 'weight' in field_name.lower():
-            array = np.frombuffer(binary_data, dtype=np.float32)
-        elif 'flag' in field_name.lower():
-            array = np.frombuffer(binary_data, dtype=np.bool_)
-        else:
-            print(f"[ERROR] Unknown field type for {field_name}")
-            return np.array([])
-        
-        if array.size > 0:
-            return array.reshape(expected_shapes[field_name])
-        
-        return array
-        
-    except Exception as e:
-        print(f"[ERROR] Deserializing {field_name}: {e}")
-        traceback.print_exc()
-        raise
+            # Decompress and reconstruct
+            decompressed = zlib.decompress(array_data['data'])
+            dtype = np.dtype(array_data['dtype'])
+            shape = tuple(array_data['shape'])
+            return np.frombuffer(decompressed, dtype=dtype).reshape(shape)
+            
+        elif array_type == 'ndarray':
+            # Uncompressed array
+            dtype = np.dtype(array_data['dtype'])
+            shape = tuple(array_data['shape'])
+            return np.frombuffer(array_data['data'], dtype=dtype).reshape(shape)
     
-
-def extract_data(visibilities, flag, weight, i):
-    """
-    Extract visibilities, weight, and flag data for a specific row index.
-
-    Parameters
-    ----------
-    visibilities : np.ndarray
-        Array of visibilities.
-    flag : np.ndarray
-        Array of flags.
-    weight : np.ndarray
-        Array of weights.
-    i : int
-        Row index to extract.
-    
-    Returns
-    -------
-    tuple
-        Tuple containing:
-        - visibilities as list of list of [real, imag]
-        - weight as list
-        - flag as list of list of int
-    """
-    try:
-        row_visibilities = visibilities[i] if i < len(visibilities) else np.array([])
-        row_weight = weight[i] if i < len(weight) else np.array([])
-        row_flag = flag[i] if i < len(flag) else np.array([])
-
-        if row_visibilities.size > 0 and np.iscomplexobj(row_visibilities):
-
-            vis_real_imag = []
-            for chan in range(row_visibilities.shape[0]):
-                chan_data = []
-                for corr in range(row_visibilities.shape[1]):
-                    complex_val = row_visibilities[chan, corr]
-                    chan_data.append([float(complex_val.real), float(complex_val.imag)])
-                vis_real_imag.append(chan_data)
-            row_vis_list = vis_real_imag
-        else:
-            row_vis_list = []
-
-        row_weight_list = row_weight.tolist() if row_weight.size > 0 else []
-        row_flag_list = row_flag.astype(int).tolist() if row_flag.size > 0 else []
-
-        return row_vis_list, row_weight_list, row_flag_list
-
-    except Exception as e:
-        print(f"[ERROR] Extracting data for row {i}: {e}")
-        traceback.print_exc()
-        raise
+    # If it's already a list/array, convert directly
+    return np.array(array_data)
 
 
 def process_chunk(chunk):
-    """
-    Process a single chunk of visibility data.
-
-    Parameters
-    ----------
-    chunk : dict
-        Dictionary containing chunk metadata and data arrays.
-    
-    Returns
-    -------
-    list
-        List of processed rows from the chunk.
-    """
     try:
         # Extract metadata
         subms_id = int(chunk.get('subms_id', -1))
-        chunk_id = int(chunk.get('chunk_id', -1))
         field_id = int(chunk.get('field_id', -1))
         spw_id = int(chunk.get('spw_id', -1)) 
         polarization_id = int(chunk.get('polarization_id', -1))
-        nrows = int(chunk.get('nrows', 0))
-    
-        row_start = int(chunk.get('row_start', 0))
-        row_end = int(chunk.get('row_end', nrows))
-        n_channels = int(chunk.get('n_channels', 0))
-        n_correlations = int(chunk.get('n_correlations', 0))
+        chunk_id = int(chunk.get('chunk_id', -1))
 
-        # Get the lists
-        antenna1 = chunk.get('antenna1', [])
-        antenna2 = chunk.get('antenna2', [])
-        scan_number = chunk.get('scan_number', [])
-        exposure = chunk.get('exposure', [])
-        interval = chunk.get('interval', [])
-        time = chunk.get('time', [])
-        u = chunk.get('u', [])
-        v = chunk.get('v', [])
-        w = chunk.get('w', [])
+        # Extract measurement set info
+        baseline_key = chunk.get('baseline_key', '')
+        antenna1 = chunk.get('antenna1', 0)
+        antenna2 = chunk.get('antenna2', 0)
+        scan_number = chunk.get('scan_number', 0)
+        
+        exposure = chunk.get('exposure', 0)
+        interval = chunk.get('interval', 0)
+        time = chunk.get('time', 0)
 
-        expected_shapes = {
-            'visibilities': (nrows, n_channels, n_correlations),
-            'weight': (nrows, n_channels, n_correlations),
-            'flag': (nrows, n_channels, n_correlations)
+        n_channels = chunk.get('n_channels', 0)
+        n_correlations = chunk.get('n_correlations', 0)
+
+        u = chunk.get('u', 0)
+        v = chunk.get('v', 0)
+        w = chunk.get('w', 0)
+
+        # Deserialize arrays
+        vs = deserialize_array(chunk.get('visibility', []))
+        ws = deserialize_array(chunk.get('weight', []))
+        fs = deserialize_array(chunk.get('flag', []))
+
+        visibility = vs.tolist()
+        weight = ws.tolist() if ws.size > 0 else []
+        flag = fs.astype(int).tolist() if fs.size > 0 else []
+
+        return {
+            'subms_id': subms_id,
+            'field_id': field_id,
+            'spw_id': spw_id,
+            'polarization_id': polarization_id,
+            'chunk_id': chunk_id,
+            'baseline_key': baseline_key,
+            'antenna1': antenna1,
+            'antenna2': antenna2,
+            'scan_number': scan_number,
+            'exposure': exposure,
+            'interval': interval,
+            'time': time,
+            'n_channels': n_channels,
+            'n_correlations': n_correlations,
+            'u': u,
+            'v': v,
+            'w': w,
+            'visibility': visibility,
+            'weight': weight,
+            'flag': flag
         }
-
-        visibilities = deserialize_array(chunk.get('visibilities', []), 'visibilities', expected_shapes)
-        weight = deserialize_array(chunk.get('weight', []), 'weight', expected_shapes)
-        flag = deserialize_array(chunk.get('flag', []), 'flag', expected_shapes)
-
-        rows = []
-
-        for i, (a1, a2, sc, ex, it, tm, uu, vv, ww) in enumerate(
-            zip(antenna1, antenna2, scan_number, exposure, interval, time, u, v, w)
-        ):
-            vs, wg, fg = extract_data(visibilities, flag, weight, i)
-
-            rows.append(
-                {
-                    'subms_id': subms_id,
-                    'chunk_id': chunk_id,
-                    'field_id': field_id,
-                    'spw_id': spw_id,
-                    'polarization_id': polarization_id,
-                    'row_start': row_start,
-                    'row_end': row_end,
-                    'nrows': nrows,
-                    'n_channels': n_channels,
-                    'n_correlations': n_correlations,
-                    'antenna1': int(a1),
-                    'antenna2': int(a2),
-                    'scan_number': int(sc),
-                    'baseline_key': normalize_baseline_key(a1, a2),
-                    'exposure': float(ex),
-                    'interval': float(it),
-                    'time': float(tm),
-                    'u': float(uu),
-                    'v': float(vv),
-                    'w': float(ww),
-                    'visibilities': vs,
-                    'weight': wg,
-                    'flag': fg
-                })
-
-        return rows
     
     except Exception as e:
         print(f"[ERROR] Processing chunk: {e}")
@@ -283,66 +159,20 @@ def process_chunk(chunk):
         raise
 
 
-def deserialize_chunk_to_rows(iterator):
-    """
-    Deserialize visibility chunks from Kafka messages into rows.
-
-    Parameters
-    ----------
-    iterator : iterator
-        Iterator over Kafka messages.
-    
-    Returns
-    -------
-    iterator
-        Iterator over deserialized visibility rows.
-    """
-    all_rows = []
-
+def deserialize_rows(iterator):
     for message in iterator:
         try:
             raw_data = message.chunk_data
             chunk = msgpack.unpackb(raw_data, raw=False, strict_map_key=False)
 
-            if chunk.get('message_type') == 'END_OF_STREAM':
-                continue
-
-            chunk_rows = process_chunk(chunk)
-
-            for row in chunk_rows:
-                spark_row = (
-                    row.get('subms_id'),
-                    row.get('chunk_id'),
-                    row.get('field_id'),
-                    row.get('spw_id'),
-                    row.get('polarization_id'),
-                    row.get('row_start'),
-                    row.get('row_end'),
-                    row.get('nrows'),
-                    row.get('n_channels'),
-                    row.get('n_correlations'),
-                    row.get('antenna1'),
-                    row.get('antenna2'),
-                    row.get('scan_number'),
-                    row.get('baseline_key'),
-                    row.get('exposure'),
-                    row.get('interval'),
-                    row.get('time'),
-                    row.get('u'),
-                    row.get('v'),
-                    row.get('w'),
-                    row.get('visibilities', []),
-                    row.get('weight', []),
-                    row.get('flag', [])
-                )
-                all_rows.append(spark_row)
+            row = process_chunk(chunk)
              
+            yield row
+
         except Exception as e:
             print(f"[ERROR] Deserializing chunk: {e}")
             traceback.print_exc()
             raise
-    
-    return iter(all_rows)
 
 
 def process_streaming_batch(df_scientific, num_partitions, epoch_id, bda_config, grid_config):  
@@ -391,21 +221,12 @@ def process_streaming_batch(df_scientific, num_partitions, epoch_id, bda_config,
         print(f"[Batch {epoch_id}] Gridding completed in {total_time:.0f} ms")
         print(f"[Batch {epoch_id}] Total processing: {total_time:.0f} ms")
 
-        # Evalutation
-        df_amplitude, df_rms, df_baseline_dependency, df_cobertura_uv = calculate_metrics(df_windowed, df_averaged, num_partitions)
-
-        return df_grid, df_amplitude, df_rms, df_baseline_dependency, df_cobertura_uv
+        return df_grid, df_averaged, df_windowed
 
     except Exception as e:
         print(f"[ERROR] Batch {epoch_id}: {e}")
         traceback.print_exc()
         return None
-
-
-def normalize_baseline_key(antenna1, antenna2):
-    """Normalize baseline key for consistent representation."""
-    ant_min, ant_max = sorted([antenna1, antenna2])
-    return f"{ant_min}-{ant_max}"
 
 
 def create_spark_session():
@@ -561,50 +382,50 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, dir
 
         kafka_stream = create_kafka_stream(spark, bootstrap_server, topic)
 
-        grid, amplitude, rms, baseline_dependency, cobertura_uv = [], [], [], [], []
-        stream_state = {'ended': False}
+        grid, averaged, windowed = [], [], []
+        stream_state = {'signal_received': False}
 
         def process_batch(df_scientific, epoch_id):    
             df_filtered, stream_ended = check_control_messages(df_scientific, epoch_id)
 
-            if stream_ended:
-                stream_state['ended'] = True
             if df_filtered.isEmpty():
                 print(f"[Batch {epoch_id}] Empty after filtering, skipping")
                 return
             
-            deserialized_rdd = df_filtered.rdd.mapPartitions(deserialize_chunk_to_rows)
+            deserialized_rdd = df_filtered.rdd.mapPartitions(deserialize_rows)
             deserialized_df = spark.createDataFrame(deserialized_rdd, visibility_schema)
 
-            df_grid, df_amplitude, df_rms, df_baseline_dependency, df_cobertura_uv = process_streaming_batch(deserialized_df, num_partitions, epoch_id, bda_config, grid_config)
+            df_grid, df_averaged, df_windowed = process_streaming_batch(deserialized_df, num_partitions, epoch_id, bda_config, grid_config)
             
             if df_grid is not None:
                 grid.append(df_grid)
-                amplitude.append(df_amplitude)
-                rms.append(df_rms)
-                baseline_dependency.append(df_baseline_dependency)
-                cobertura_uv.append(df_cobertura_uv)
+                averaged.append(df_averaged)
+                windowed.append(df_windowed)
                 print(f"[Batch {epoch_id}] ✓ Completed successfully")
             else:
                 print(f"[Batch {epoch_id}] ✗ No output generated")
 
             print("=" * 80 + "\n")
 
+            if stream_ended:
+                stream_state['signal_received'] = True
+                print(f"[Batch {epoch_id}] ✓ END signal detected")
+            
         checkpoint_path = f"/tmp/spark-bda-{uuid.uuid4().hex[:8]}-{int(time.time())}"
 
         query = kafka_stream.writeStream \
             .foreachBatch(process_batch) \
-            .trigger(processingTime="10 seconds") \
+            .trigger(processingTime="60 seconds") \
             .option("checkpointLocation", checkpoint_path) \
             .start()
 
         print("[Consumer] ✓ Streaming query started")
         print("[Consumer] Waiting for data...")
 
-        while query.isActive and not stream_state['ended']:
+        while query.isActive and not stream_state['signal_received']:
             time.sleep(5)
 
-        if query.isActive and stream_state['ended']:
+        if query.isActive and stream_state['signal_received']:
             query.stop()
 
         query.awaitTermination()
@@ -613,20 +434,23 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, dir
 
         # Generate final image
         if grid:
-            #combine_and_image(grid, num_partitions, grid_config, dirty_image_output, psf_output)
-
-            print("[Consumer] ✓ Combining evaluation metrics...")
-            df_amplitude = reduce(DataFrame.unionByName, amplitude)
-            df_rms = reduce(DataFrame.unionByName, rms)
-            df_baseline_dependency = reduce(DataFrame.unionByName, baseline_dependency)
-            df_cobertura_uv = reduce(DataFrame.unionByName, cobertura_uv)
-            
-            print("[Consumer] ✓ Generating evaluation metrics...")
-
-            consolidate_metrics(df_amplitude, df_rms, df_baseline_dependency, df_cobertura_uv, bda_config)
+            print("[Consumer] ✓ Generating final dirty image...")
+            combine_and_image(grid, num_partitions, grid_config, dirty_image_output, psf_output)
         else:
             print("[Consumer] No data processed, no image generated")
 
+        if averaged and windowed:
+            print("[Consumer] ✓ Saving processed data samples...")
+            df_averaged = reduce(DataFrame.unionByName, averaged)
+            df_windowed = reduce(DataFrame.unionByName, windowed)
+
+            df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv = calculate_metrics(df_windowed, df_averaged, num_partitions)
+            consolidate_metrics(df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv, bda_config)
+        else:
+            print("[Consumer] No processed data samples available for metrics")
+
+        print("[Consumer] Consumer finished processing")
+        
     except KeyboardInterrupt:
         print("[Consumer] Interrupted by user")
         

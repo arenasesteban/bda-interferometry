@@ -1,57 +1,10 @@
 import numpy as np
 import traceback
 
-
-def get_chunk_size(vs_set):
-    """
-    Get chunk size for the given visibility dataset.
-
-    Parameters
-    ----------
-    vs_set : VisibilitySet
-        The visibility dataset.
-    
-    Returns
-    -------
-    int
-        Chunk size.
-    """
-    try:
-        MAX_CHUNK_SIZE = 1000
-
-        chunks = vs_set.data.data.chunks[0]
-
-        if len(chunks) > 1:
-            return min(chunks[0], MAX_CHUNK_SIZE)
-        else:
-            return min(MAX_CHUNK_SIZE, vs_set.nrows)
-
-    except Exception as e:
-        print(f"Error getting chunk size: {e}")
-        traceback.print_exc()
-        raise
+CHUNK_SIZE = 10
 
 
 def extract_field_data(xr_array, start_row, end_row, coord_idx=None):
-    """
-    Extract data slice from an xarray DataArray.
-
-    Parameters
-    ----------
-    xr_array : xarray.DataArray
-        The input xarray DataArray.
-    start_row : int
-        The starting row index.
-    end_row : int
-        The ending row index.
-    coord_idx : int, optional
-        The index of the coordinate to extract.
-
-    Returns
-    -------
-    np.ndarray
-        The extracted data slice.
-    """
     if xr_array is None:
         return None
 
@@ -72,148 +25,90 @@ def extract_field_data(xr_array, start_row, end_row, coord_idx=None):
         raise
 
 
-def convert_to_list(np_array):
-    """
-    Convert a numpy array to a list.
-    
-    Parameters
-    ----------
-    np_array : np.ndarray
-        The input numpy array.
-    
-    Returns
-    -------
-    list
-        The converted list.
-    """
-    if np_array is None:
-        return []
+def baseline_key(antenna1, antenna2):
+    ant_min, ant_max = sorted([antenna1, antenna2])
+    return f"{ant_min}-{ant_max}"
 
+
+def extract_data(subms, dataset, start_row, end_row, n_channels, n_correlations, visibilities):
     try:
-        if not isinstance(np_array, np.ndarray):
-            np_array = np.array(np_array)
+        antenna1 = dataset.antenna1.data[start_row:end_row].compute()
+        antenna2 = dataset.antenna2.data[start_row:end_row].compute()
+        scan_number = dataset.scan_number.data[start_row:end_row].compute()
+        
+        exposure = dataset.dataset.EXPOSURE[start_row:end_row].compute()
+        interval = dataset.dataset.INTERVAL[start_row:end_row].compute()
+        time = dataset.time.data[start_row:end_row].compute()
+        
+        uvw = dataset.uvw.data[start_row:end_row].compute()
+        u = uvw[:, 0]
+        v = uvw[:, 1]
+        w = uvw[:, 2]
+        
+        visibilities = visibilities[start_row:end_row].compute()
+        visibilities = np.stack([visibilities.real, visibilities.imag], axis=-1)
+        weights = dataset.weight.data[start_row:end_row].compute()
+        flags = dataset.flag.data[start_row:end_row].compute()
 
-        return np_array.tolist()
-
-    except Exception as e:
-        print(f"Error converting array to list: {e}")
-        traceback.print_exc()
-        raise
-
-
-def extract_chunk_data(
-    subms,
-    vs_set,
-    chunk_id,
-    start_row,
-    end_row,
-    n_channels,
-    n_correlations,
-    visibilities
-):
-    """
-    Extract data for a specific chunk from the visibility dataset.
-
-    Parameters
-    ----------
-    subms : SubMS
-        The sub-measurement set.
-    vs_set : VisibilitySet
-        The visibility dataset.
-    chunk_id : int
-        The chunk identifier.
-    start_row : int
-        The starting row index.
-    end_row : int
-        The ending row index.
-    n_channels : int
-        Number of channels.
-    n_correlations : int
-        Number of correlations.
-    
-    Returns
-    -------
-    dict
-        Extracted chunk data.
-    """
-    try:
-        chunk_size = end_row - start_row
-
+        baseline_keys = [baseline_key(int(a1), int(a2)) for a1, a2 in zip(antenna1, antenna2)]
+        
         return {
             "subms_id": subms.id,
-            "chunk_id": chunk_id,
             "field_id": subms.field_id,
             "spw_id": subms.spw_id,
             "polarization_id": subms.polarization_id,
-
-            "row_start": start_row,
-            "row_end": end_row,
-            "nrows": chunk_size,
+            "chunk_id": f"{start_row}_{end_row}",
             
+            "baseline_keys": baseline_keys,
+            "antenna1": antenna1,
+            "antenna2": antenna2,
+            "scan_number": scan_number,
+            
+            "exposure": exposure,
+            "interval": interval,
+            "time": time,
+
             "n_channels": n_channels,
             "n_correlations": n_correlations,
-
-            "antenna1": convert_to_list(extract_field_data(vs_set.antenna1, start_row, end_row)),
-            "antenna2": convert_to_list(extract_field_data(vs_set.antenna2, start_row, end_row)),
-            "scan_number": convert_to_list(extract_field_data(vs_set.scan_number, start_row, end_row)),
             
-            "exposure": convert_to_list(extract_field_data(vs_set.dataset.EXPOSURE, start_row, end_row)),
-            "interval": convert_to_list(extract_field_data(vs_set.dataset.INTERVAL, start_row, end_row)),
-            "time": convert_to_list(extract_field_data(vs_set.time, start_row, end_row)),
+            "u": u,
+            "v": v,
+            "w": w,
             
-            "u": convert_to_list(extract_field_data(vs_set.uvw, start_row, end_row, coord_idx=0)),
-            "v": convert_to_list(extract_field_data(vs_set.uvw, start_row, end_row, coord_idx=1)),
-            "w": convert_to_list(extract_field_data(vs_set.uvw, start_row, end_row, coord_idx=2)),
-            
-            "visibilities": visibilities[start_row:end_row].compute(),
-            "weight": extract_field_data(vs_set.weight, start_row, end_row),
-            "flag": extract_field_data(vs_set.flag, start_row, end_row),
+            "visibilities": visibilities,
+            "weights": weights,
+            "flags": flags,
         }
-
+    
     except Exception as e:
-        print(f"Error extracting chunk data: {e}")
+        print(f"Error extracting spectral chunk: {e}")
         traceback.print_exc()
         raise
 
 
-def extract_subms_chunks(subms):
-    """
-    Extract chunks of data from a sub-measurement set.
-
-    Parameters
-    ----------
-    subms : SubMS
-        The sub-measurement set.
-
-    Returns
-    -------
-    generator
-        A generator yielding extracted chunk data.
-    """
+def extract_chunks(subms):
     try:
-        vs_set = subms.visibilities
-        visibilities = vs_set.data.data.persist()
+        dataset = subms.visibilities
+        visibilities = dataset.data.data.persist()
 
-        nrows = vs_set.nrows
-        n_channels = vs_set.data.shape[1]
-        n_correlations = vs_set.data.shape[2]
+        nrows = dataset.nrows
+        n_channels = dataset.data.shape[1]
+        n_correlations = dataset.data.shape[2]
 
-        chunk_size = get_chunk_size(vs_set)
+        for start_row in range(0, nrows, CHUNK_SIZE):
+            end_row = min(start_row + CHUNK_SIZE, nrows)
 
-        print("[DEBUG] Chunk size:", chunk_size)
-
-        chunk_id = 0
-        for start_row in range(0, nrows, chunk_size):
-            end_row = min(start_row + chunk_size, nrows)
-            
-            chunk = extract_chunk_data(
-                subms, vs_set, chunk_id, start_row, end_row,
-                n_channels, n_correlations,
-                visibilities
+            chunk = extract_data(
+                subms,
+                dataset,
+                start_row,
+                end_row,
+                n_channels,
+                n_correlations,
+                visibilities,
             )
-            
+
             yield chunk
-            chunk_id += 1
 
     except Exception as e:
         print(f"Error extracting subms chunks: {e}")
@@ -221,20 +116,7 @@ def extract_subms_chunks(subms):
         raise
 
 
-def stream_subms_chunks(dataset):
-    """
-    Stream chunks of data from a measurement set.
-
-    Parameters
-    ----------
-    dataset : Dataset
-        The Pyralysis dataset.
-    
-    Returns
-    -------
-    generator
-        A generator yielding extracted chunk data from all sub-measurement sets.
-    """
+def stream_dataset(dataset):
     try:
         if not hasattr(dataset, "ms_list") or dataset.ms_list is None:
             raise ValueError("No ms_list found in dataset")
@@ -243,9 +125,9 @@ def stream_subms_chunks(dataset):
             if subms is None or subms.visibilities is None:
                 continue
 
-            yield from extract_subms_chunks(subms)
+            yield from extract_chunks(subms)
 
     except Exception as e:
-        print(f"Error streaming subms chunks: {e}")
+        print(f"Error streaming dataset: {e}")
         traceback.print_exc()
         raise

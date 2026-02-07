@@ -1,9 +1,3 @@
-"""
-Producer Service - Interferometry Data Streaming Microservice
-
-This service generates synthetic interferometric visibility data, serializes it, and streams it to a Kafka topic.
-"""
-
 import sys
 import traceback
 import msgpack
@@ -31,26 +25,13 @@ src_path = project_root / "src"
 sys.path.append(str(src_path))
 
 from data.simulation import generate_dataset
-from data.extraction import stream_subms_chunks
+from data.extraction import stream_dataset
 
 # Supported padding strategies
 PADDING_STRATEGY = ["FIXED", "DERIVED"]
 
 
 def load_simulation_config(config_path):
-    """
-    Load simulation configuration from a JSON file.
-    
-    Parameters
-    ----------
-    config_path : str
-        Path to the configuration JSON file.
-    
-    Returns
-    -------
-    dict
-        Configuration dictionary.
-    """
     if config_path and Path(config_path).exists():
         try:
             with open(config_path, 'r') as f:
@@ -63,22 +44,6 @@ def load_simulation_config(config_path):
 
 
 def update_bda_config(config_path, ref_nu, min_diameter):
-    """
-    Update the BDA configuration file with new values.
-
-    Parameters
-    ----------
-    config_path : str
-        Path to the configuration JSON file.
-    ref_nu : float
-        Reference frequency.
-    min_diameter : float
-        Minimum diameter.
-
-    Returns
-    -------
-    None
-    """
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
@@ -96,24 +61,6 @@ def update_bda_config(config_path, ref_nu, min_diameter):
 
 
 def update_grid_config(config_path, theo_resolution, corrs_string, chan_freq):
-    """
-    Update the grid configuration file with new values.
-    
-    Parameters
-    ----------
-    config_path : str
-        Path to the configuration JSON file.
-    theo_resolution : float
-        Theoretical resolution.
-    corrs_string : str
-        Correlations string.
-    chan_freq : list
-        List of channel frequencies.
-    
-    Returns
-    -------
-    None
-    """
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
@@ -140,19 +87,6 @@ def update_grid_config(config_path, theo_resolution, corrs_string, chan_freq):
 
 
 def serialize_chunk(chunk):
-    """
-    Serialize a chunk of data for Kafka.
-    
-    Parameters
-    ----------
-    chunk : dict
-        Chunk of data to serialize.
-    
-    Returns
-    -------
-    bytes
-        Serialized chunk.
-    """
     try:
         msgpack_chunk = {}
         
@@ -186,64 +120,31 @@ def serialize_chunk(chunk):
 
 
 def create_kafka_producer(kafka_servers=None, **kwargs):
-    """
-    Create a Kafka producer instance with optimized settings.
-
-    Parameters
-    ----------
-    kafka_servers : list, optional
-        List of Kafka server addresses. Defaults to DEFAULT_KAFKA_SERVERS.
-    **kwargs : dict
-        Additional producer configuration overrides.
-    
-    Returns
-    -------
-    KafkaProducer
-        Configured Kafka producer instance.
-    
-    Raises
-    ------
-    KafkaError
-        If producer creation fails.
-    """
     kafka_servers = kafka_servers or DEFAULT_KAFKA_SERVERS
-    
-    producer_config = {
+
+    config = {
         'bootstrap_servers': kafka_servers,
         'value_serializer': serialize_chunk,
-        'key_serializer': lambda x: str(x).encode('utf-8') if x is not None else None,
-
-        # Compression and batching
+        'key_serializer': lambda x: str(x).encode('utf-8') if x else None,
         'compression_type': 'lz4',
-        'batch_size': 65536,  # 64 KB
-        'linger_ms': 150,
-
-        # Buffer sizes
-        'max_request_size': 25000000,  # 25 MB
-        'buffer_memory': 67108864,  # 64 MB
-
-        # Reliability settings
+        'batch_size': 10485760,
+        'linger_ms': 100,
+        'max_request_size': 10485760,
+        'buffer_memory': 536870912,
         'enable_idempotence': True,
-        'acks': 'all',
+        'acks': "all",
         'retries': 5,
-
-        # Throughput optimizations
         'max_in_flight_requests_per_connection': 1,
-
-        # Timeouts
         'request_timeout_ms': 30000,
         'delivery_timeout_ms': 120000,
-
-        # Metadata refresh
-        'metadata_max_age_ms': 300000, # 5 minutes
+        'metadata_max_age_ms': 300000,
     }
 
     # Apply any overrides
-    producer_config.update(kwargs)
+    config.update(kwargs)
     
     try:
-        producer = KafkaProducer(**producer_config)
-        
+        producer = KafkaProducer(**config)
         return producer
     
     except KafkaError as e:
@@ -255,210 +156,115 @@ def create_kafka_producer(kafka_servers=None, **kwargs):
         raise
 
 
-def stream_chunks_to_kafka(dataset, producer, topic, base_streaming_delay, enable_warmup, num_partitions=None):
-    """
-    Stream chunks of data to Kafka with round-robin distribution.
+def stream_kafka(dataset, producer, topic, base_delay=0.01, enable_warmup=True):
+    MAX_PENDING = 5000
+    HIGH_LATENCY = 500
 
-    Parameters
-    ----------
-    dataset : Dataset
-        The Pyralysis dataset.
-    producer : KafkaProducer
-        The Kafka producer instance.
-    topic : str
-        Kafka topic to send data to.
-    base_streaming_delay : float
-        Base delay between sending chunks (in seconds).
-    enable_warmup : bool
-        Whether to enable warmup period for initial chunks.
-    num_partitions : int, optional
-        Number of Kafka partitions (for logging/stats only).
-
-    Returns
-    -------
-    dict
-        Streaming statistics and metrics.
-    """
-    # Initialize metrics and state
     pending_futures = []
-    current_delay = 0.8 if enable_warmup else base_streaming_delay
-    warmup_chunks_remaining = 20 if enable_warmup else 0
-    
-    # Timing for periodic flush
-    last_flush_time = time.time()
-    flush_interval = 2.0  # 2 seconds
-    
-    # Backpressure thresholds
-    MAX_PENDING_FUTURES = 30
-    HIGH_LATENCY_THRESHOLD = 3000.0  # ms
-
-    # Simple metrics tracking
-    total_chunks = 0
-    failed_chunks = 0
     send_times = []
-    max_send_times_window = 50
+    total_msgs = 0
+    failed_msgs = 0
+
+    current_delay = 0.5 if enable_warmup else base_delay
+    warmup_remaining = 100 if enable_warmup else 0
     
-    # Track distribution across partitions
-    partition_distribution = {}
+    last_flush = time.time()
+    start_time = time.time()
 
     try:
-        for chunk in stream_subms_chunks(dataset):
-            chunk_start_time = time.time()
-            
-            key = None 
-            
-            chunk_id = f"{chunk['subms_id']}_{chunk['chunk_id']}"
-            total_chunks += 1
-            
-            try:
-                # Non-blocking send
-                future = producer.send(topic, value=chunk, key=key)
-                pending_futures.append({
-                    'future': future,
-                    'start_time': chunk_start_time,
-                    'chunk_id': chunk_id
-                })
-                
-                # Clean up completed futures and measure send times
-                completed_futures = []
-                for pending in pending_futures:
-                    if pending['future'].is_done:
-                        completed_futures.append(pending)
-                        try:
-                            record_metadata = pending['future'].get(timeout=0.1)
-                            
-                            # Track partition distribution
-                            partition = record_metadata.partition
-                            partition_distribution[partition] = partition_distribution.get(partition, 0) + 1
-                            
-                            # Record successful send time
-                            send_time_ms = (time.time() - pending['start_time']) * 1000
-                            send_times.append(send_time_ms)
-                            print(f"✓ Chunk {pending['chunk_id']} → partition {partition} - {send_time_ms:.2f} ms")
+        for chunk in stream_dataset(dataset):
+            chunk_start = time.time()
+            key = None
+            msg_id = chunk['baseline_key'] + "-" + str(chunk['chunk_id'])
 
-                            # Keep only recent send times
-                            if len(send_times) > max_send_times_window:
-                                send_times.pop(0)
-                        except KafkaError as e:
-                            failed_chunks += 1
-                            print(f"✗ Error sending chunk {pending['chunk_id']}: {e}")
-                
-                # Remove completed futures
-                pending_futures = [p for p in pending_futures if p not in completed_futures]
-                
-                # Calculate average send time from recent samples
-                avg_send_time = sum(send_times) / len(send_times) if send_times else 0
-                
-                # Sophisticated backpressure logic
-                backpressure_triggered = False
-                
-                # 1. Too many pending futures
-                if len(pending_futures) > MAX_PENDING_FUTURES:
-                    current_delay = min(current_delay * 1.2, 1.0)
-                    backpressure_triggered = True
-                    print(f"Backpressure: Too many pending futures ({len(pending_futures)})")
-                
-                # 2. High average send latency
-                if avg_send_time > HIGH_LATENCY_THRESHOLD:
-                    current_delay = min(current_delay * 1.1, 1.0)
-                    backpressure_triggered = True
-                    print(f"Backpressure: High latency detected ({avg_send_time:.2f}ms)")
-                
-                # 3. Recovery: reduce delay if conditions improve
-                if not backpressure_triggered:
-                    if len(pending_futures) < 10 and avg_send_time < HIGH_LATENCY_THRESHOLD * 0.7:
-                        target_delay = 0.8 if warmup_chunks_remaining > 0 else base_streaming_delay
-                        current_delay = max(current_delay * 0.95, target_delay)
-                
-                # Warm-up period management
-                if warmup_chunks_remaining > 0:
-                    warmup_chunks_remaining -= 1
-                    if warmup_chunks_remaining == 0:
-                        current_delay = base_streaming_delay
-                        print("Warm-up period completed")
-                
-                # Time-based flushing
-                current_time = time.time()
-                if current_time - last_flush_time >= flush_interval:
-                    producer.flush(timeout=1)
-                    last_flush_time = current_time
-                
-                # Apply current delay
+            total_msgs += 1
+            
+            future = producer.send(topic, value=chunk, key=key)
+            pending_futures.append({'future': future, 'start_time': chunk_start, 'msg_id': msg_id})
+            
+            completed = []
+            for pending in pending_futures:
+                if pending['future'].is_done:
+                    completed.append(pending)
+                    try:
+                        pending['future'].get(timeout = 0.1)
+
+                        send_times.append((time.time() - pending['start_time']) * 1000)
+                        
+                        print(f"[Producer] Sent message ID {pending['msg_id']}", flush=True)
+
+                        if len(send_times) > 100:
+                            send_times.pop(0)
+                    except KafkaError:
+                        failed_msgs += 1
+                        print(f"[Producer] Error sending message ID {pending['msg_id']}", flush=True)
+
+            pending_futures = [p for p in pending_futures if p not in completed]
+            
+            avg_time = sum(send_times) / len(send_times) if send_times else 0
+
+            if len(pending_futures) > MAX_PENDING or avg_time > HIGH_LATENCY:
+                current_delay = min(current_delay * 1.2, 1.0)
+            elif len(pending_futures) < 100 and avg_time < HIGH_LATENCY * 0.7:
+                current_delay = max(current_delay * 0.95, base_delay)
+            
+            if warmup_remaining > 0:
+                warmup_remaining -= 1
+                if warmup_remaining == 0:
+                    current_delay = base_delay
+                    print("[Producer] Warmup period complete", flush=True)
+
+            if time.time() - last_flush >= 1.0:
+                producer.flush(timeout = 1)
+                last_flush = time.time()
+            
+            if current_delay > 0:
                 time.sleep(current_delay)
-                
-            except Exception as e:
-                failed_chunks += 1
-                print(f"Error processing chunk {chunk_id}: {e}")
-                continue
 
     except Exception as e:
-        print(f"Fatal error during streaming: {e}")
+        print(f"[Producer] Error during streaming: {e}")
         traceback.print_exc()
         raise
-        
+
     finally:
-        # Wait for remaining futures
-        if pending_futures:
-            for pending in pending_futures:
-                try:
-                    record_metadata = pending['future'].get(timeout=10)
-                    partition = record_metadata.partition
-                    partition_distribution[partition] = partition_distribution.get(partition, 0) + 1
-                    
-                    send_time_ms = (time.time() - pending['start_time']) * 1000
-                    send_times.append(send_time_ms)
-                    print(f"✓ Final chunk: {pending['chunk_id']} → partition {partition}")
-                except KafkaError as e:
-                    failed_chunks += 1
-                    print(f"✗ Final chunk {pending['chunk_id']}: FAILED - {e}")
+        for pending in pending_futures:
+            try:
+                pending['future'].get(timeout = 10)
+                print(f"[Producer] Sent message ID {pending['msg_id']}")
+            except KafkaError:
+                failed_msgs += 1
+                print(f"[Producer] Error sending message ID {pending['msg_id']}", flush=True)
         
-        # Final flush
-        producer.flush(timeout=5)
+        producer.flush(timeout = 5)
 
-        # Calculate final statistics
-        sent_chunks = total_chunks - failed_chunks
-        avg_send_time_final = sum(send_times) / len(send_times) if send_times else 0
+        print("[Producer] Sending END signal...")
 
-        print("\n[Producer] Sending END signal...")
-        control_message = {
-            'message_type': 'END',
-            'timestamp': time.time(),
-            'total_chunks': total_chunks,
-            'sent_chunks': sent_chunks,
-            'failed_chunks': failed_chunks,
-            'partition_distribution': partition_distribution
-        }
-        
-        producer.send(topic, value=control_message, key="__CONTROL__").get(timeout=10)
+        control_message = {'message_type': 'END', 'timestamp': time.time()}
+        producer.send(topic, value=control_message, key="__CONTROL__").get(timeout = 10)
 
-        producer.flush(timeout=5)
-        print("[PRODUCER] ✓ END_OF_STREAM signal sent")
+        producer.flush(timeout = 5)
+
+        print("[Producer] ✓ END_OF_STREAM signal sent")
         
-        print(f"\n=== Streaming Summary ===")
-        print(f"Total chunks: {total_chunks}")
-        print(f"Sent successfully: {sent_chunks}")
-        print(f"Failed: {failed_chunks}")
-        print(f"Average send time: {avg_send_time_final:.2f}ms")
+        total_time = time.time() - start_time
+        sent = total_msgs - failed_msgs
+        throughput = total_msgs / total_time if total_time > 0 else 0
         
-        # Show partition distribution
-        if partition_distribution:
-            print(f"\n=== Partition Distribution ===")
-            for partition in sorted(partition_distribution.keys()):
-                count = partition_distribution[partition]
-                percentage = (count / sent_chunks * 100) if sent_chunks > 0 else 0
-                print(f"Partition {partition}: {count} chunks ({percentage:.1f}%)")
+        print(f"\n{'=' * 60}")
+        print(f"SUMMARY: {total_msgs:,} total | {sent:,} sent | {failed_msgs:,} failed")
+        print(f"Time: {total_time:.2f}s | Throughput: {throughput:,.0f} msg/s")
+        print(f"{'=' * 60}\n")
         
     return {
-        'total_chunks': total_chunks,
-        'failed_chunks': failed_chunks,
-        'sent_chunks': sent_chunks,
-        'average_send_time_ms': avg_send_time_final,
-        'send_times': send_times,
-        'partition_distribution': partition_distribution
+        'total_messages': total_msgs, 
+        'sent': sent, 
+        'failed': failed_msgs, 
+        'time': total_time, 
+        'throughput': throughput
     }
 
 
-def run_producer_service(antenna_config_path, simulation_config_path, topic):
+def run_producer(antenna_config_path, simulation_config_path, topic):
     """
     Run the producer service to stream data to Kafka.
 
@@ -483,7 +289,7 @@ def run_producer_service(antenna_config_path, simulation_config_path, topic):
     
     try:
         sim_config = load_simulation_config(simulation_config_path)
-        print("✓ Loaded simulation configuration.")
+        print("✓ Loaded simulation configuration.", flush=True)
 
         if "source_path" in sim_config:
             dataset = generate_dataset(
@@ -498,7 +304,7 @@ def run_producer_service(antenna_config_path, simulation_config_path, topic):
                 source_path=sim_config["source_path"]
             )
         else:
-                dataset = generate_dataset(
+            dataset = generate_dataset(
                 antenna_config_path=antenna_config_path,
                 freq_min=sim_config["freq_min"],
                 freq_max=sim_config["freq_max"],
@@ -510,14 +316,14 @@ def run_producer_service(antenna_config_path, simulation_config_path, topic):
                 flux_density=sim_config["flux_density"],
                 spectral_index=sim_config["spectral_index"]
             )
-        print("✓ Dataset generation complete.")
+        print("✓ Dataset generation complete.", flush=True)
 
         update_bda_config(
             config_path="./configs/bda_config.json",
             ref_nu=dataset.spws.ref_nu,
             min_diameter=dataset.antenna.min_diameter,
         )
-        print("✓ BDA configuration updated.")
+        print("✓ BDA configuration updated.", flush=True)
 
         update_grid_config(
             config_path="./configs/grid_config.json",
@@ -525,19 +331,13 @@ def run_producer_service(antenna_config_path, simulation_config_path, topic):
             corrs_string=dataset.polarization.corrs_string,
             chan_freq=dataset.spws.dataset[0].CHAN_FREQ.compute().values[0].tolist()
         )
-        print("✓ Grid configuration updated.")
+        print("✓ Grid configuration updated.", flush=True)
 
         producer = create_kafka_producer()
-        print("✓ Kafka producer created.")
+        print("✓ Kafka producer created.", flush=True)
 
-        streaming_results = stream_chunks_to_kafka(
-            dataset, 
-            producer, 
-            topic, 
-            sim_config.get('base_streaming_delay', 0.1),
-            sim_config.get('enable_warmup', True)
-        )
-        print("✓ Streaming complete.")
+        streaming_results = stream_kafka(dataset, producer, topic)
+        print("✓ Streaming complete.", flush=True)
 
         return streaming_results
 
@@ -561,11 +361,11 @@ def main():
     parser.add_argument("--antenna-config", help="Path to antenna configuration file")
     parser.add_argument("--simulation-config", help="Path to simulation configuration file")
     parser.add_argument("--topic", help=f"Kafka topic name")
-    
+
     args = parser.parse_args()
 
     try:
-        run_producer_service(
+        run_producer(
             antenna_config_path=args.antenna_config,
             simulation_config_path=args.simulation_config,
             topic=args.topic
@@ -575,7 +375,6 @@ def main():
         print(f"Fatal error in main: {e}")
         traceback.print_exc()
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
