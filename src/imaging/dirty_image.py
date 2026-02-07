@@ -9,7 +9,12 @@ def dataframe_to_grid(df_gridded, grid_config):
     
     u_size, v_size = int(img_size * padding_factor), int(img_size * padding_factor)
 
+    df_gridded.cache()
+    df_gridded.count()
+
     pdf = df_gridded.toPandas()
+
+    df_gridded.unpersist()
 
     u_coords, v_coords = pdf['u_pix'], pdf['v_pix']
     vs_real, vs_imag = pdf['vs_real'], pdf['vs_imag']
