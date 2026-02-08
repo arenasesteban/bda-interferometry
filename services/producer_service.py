@@ -172,10 +172,10 @@ def stream_kafka(dataset, producer, topic, base_delay=0.01, enable_warmup=True):
     start_time = time.time()
 
     try:
-        for chunk in stream_dataset(dataset):
+        for chunk, subms_id in stream_dataset(dataset):
             chunk_start = time.time()
             key = None
-            msg_id = chunk['baseline_key'] + "-" + str(chunk['chunk_id'])
+            msg_id = f"{subms_id}-{chunk['chunk_id']}"
 
             total_msgs += 1
             
@@ -230,7 +230,7 @@ def stream_kafka(dataset, producer, topic, base_delay=0.01, enable_warmup=True):
         for pending in pending_futures:
             try:
                 pending['future'].get(timeout = 10)
-                print(f"[Producer] Sent message ID {pending['msg_id']}")
+                print(f"[Producer] Sent message ID {pending['msg_id']}", flush=True)
             except KafkaError:
                 failed_msgs += 1
                 print(f"[Producer] Error sending message ID {pending['msg_id']}", flush=True)

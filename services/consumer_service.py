@@ -9,6 +9,8 @@ import argparse
 from pathlib import Path
 import time
 import traceback
+
+from yaml import scan
 import msgpack
 import numpy as np
 import zlib
@@ -50,7 +52,7 @@ def define_visibility_schema():
         StructField("field_id", IntegerType(), True),
         StructField("spw_id", IntegerType(), True),
         StructField("polarization_id", IntegerType(), True),
-        StructField("chunk_id", IntegerType(), True),
+        StructField("chunk_id", StringType(), True),
         
         StructField("baseline_key", StringType(), True),
         StructField("antenna1", IntegerType(), True),
@@ -102,56 +104,65 @@ def process_chunk(chunk):
         field_id = int(chunk.get('field_id', -1))
         spw_id = int(chunk.get('spw_id', -1)) 
         polarization_id = int(chunk.get('polarization_id', -1))
-        chunk_id = int(chunk.get('chunk_id', -1))
+        chunk_id = chunk.get('chunk_id', -1)
 
         # Extract measurement set info
-        baseline_key = chunk.get('baseline_key', '')
-        antenna1 = chunk.get('antenna1', 0)
-        antenna2 = chunk.get('antenna2', 0)
-        scan_number = chunk.get('scan_number', 0)
+        baseline_keys = chunk.get('baseline_keys', [])
+        antenna1 = chunk.get('antenna1', [])
+        antenna2 = chunk.get('antenna2', [])
+        scan_number = chunk.get('scan_number', [])
         
-        exposure = chunk.get('exposure', 0)
-        interval = chunk.get('interval', 0)
-        time = chunk.get('time', 0)
+        exposure = chunk.get('exposure', [])
+        interval = chunk.get('interval', [])
+        time = chunk.get('time', [])
 
         n_channels = chunk.get('n_channels', 0)
         n_correlations = chunk.get('n_correlations', 0)
 
-        u = chunk.get('u', 0)
-        v = chunk.get('v', 0)
-        w = chunk.get('w', 0)
+        u = chunk.get('u', [])
+        v = chunk.get('v', [])
+        w = chunk.get('w', [])
 
         # Deserialize arrays
-        vs = deserialize_array(chunk.get('visibility', []))
-        ws = deserialize_array(chunk.get('weight', []))
-        fs = deserialize_array(chunk.get('flag', []))
+        vs = deserialize_array(chunk.get('visibilities', []))
+        ws = deserialize_array(chunk.get('weights', []))
+        fs = deserialize_array(chunk.get('flags', []))
 
-        visibility = vs.tolist()
-        weight = ws.tolist() if ws.size > 0 else []
-        flag = fs.astype(int).tolist() if fs.size > 0 else []
+        visibilities = vs.tolist()
+        weights = ws.tolist() if ws.size > 0 else []
+        flags = fs.astype(int).tolist() if fs.size > 0 else []
 
-        return {
-            'subms_id': subms_id,
-            'field_id': field_id,
-            'spw_id': spw_id,
-            'polarization_id': polarization_id,
-            'chunk_id': chunk_id,
-            'baseline_key': baseline_key,
-            'antenna1': antenna1,
-            'antenna2': antenna2,
-            'scan_number': scan_number,
-            'exposure': exposure,
-            'interval': interval,
-            'time': time,
-            'n_channels': n_channels,
-            'n_correlations': n_correlations,
-            'u': u,
-            'v': v,
-            'w': w,
-            'visibility': visibility,
-            'weight': weight,
-            'flag': flag
-        }
+        rows = []
+
+        for (bk, a1, a2, sc, ex, it, tm, uu, vv, ww, vs, ws, fs) in zip(
+            baseline_keys, antenna1, antenna2, scan_number, exposure, interval, time, u, v, w, visibilities, weights, flags
+        ):
+            row = {
+                'subms_id': subms_id,
+                'field_id': field_id,
+                'spw_id': spw_id,
+                'polarization_id': polarization_id,
+                'chunk_id': chunk_id,
+                'baseline_key': bk,
+                'antenna1': a1,
+                'antenna2': a2,
+                'scan_number': sc,
+                'exposure': ex,
+                'interval': it,
+                'time': tm,
+                'n_channels': n_channels,
+                'n_correlations': n_correlations,
+                'u': uu,
+                'v': vv,
+                'w': ww,
+                'visibility': vs,
+                'weight': ws if ws else [],
+                'flag': fs if fs else []
+            }
+
+            rows.append(row)
+
+        return rows
     
     except Exception as e:
         print(f"[ERROR] Processing chunk: {e}")
@@ -160,19 +171,21 @@ def process_chunk(chunk):
 
 
 def deserialize_rows(iterator):
+    all_rows = []
+
     for message in iterator:
         try:
             raw_data = message.chunk_data
             chunk = msgpack.unpackb(raw_data, raw=False, strict_map_key=False)
 
-            row = process_chunk(chunk)
-             
-            yield row
+            all_rows.extend(process_chunk(chunk))
 
         except Exception as e:
             print(f"[ERROR] Deserializing chunk: {e}")
             traceback.print_exc()
             raise
+
+    return iter(all_rows)
 
 
 def process_streaming_batch(df_scientific, num_partitions, epoch_id, bda_config, grid_config):  

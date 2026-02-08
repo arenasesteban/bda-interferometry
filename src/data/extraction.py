@@ -32,23 +32,23 @@ def baseline_key(antenna1, antenna2):
 
 def extract_data(subms, dataset, start_row, end_row, n_channels, n_correlations, visibilities):
     try:
-        antenna1 = dataset.antenna1.data[start_row:end_row].compute()
-        antenna2 = dataset.antenna2.data[start_row:end_row].compute()
-        scan_number = dataset.scan_number.data[start_row:end_row].compute()
+        antenna1 = np.array(dataset.antenna1.data[start_row:end_row].compute()).tolist()
+        antenna2 = np.array(dataset.antenna2.data[start_row:end_row].compute()).tolist()
+        scan_number = np.array(dataset.scan_number.data[start_row:end_row].compute()).tolist()
         
-        exposure = dataset.dataset.EXPOSURE[start_row:end_row].compute()
-        interval = dataset.dataset.INTERVAL[start_row:end_row].compute()
-        time = dataset.time.data[start_row:end_row].compute()
+        exposure = np.array(dataset.dataset.EXPOSURE[start_row:end_row].compute()).tolist()
+        interval = np.array(dataset.dataset.INTERVAL[start_row:end_row].compute()).tolist()
+        time = np.array(dataset.time.data[start_row:end_row].compute()).tolist()
         
-        uvw = dataset.uvw.data[start_row:end_row].compute()
-        u = uvw[:, 0]
-        v = uvw[:, 1]
-        w = uvw[:, 2]
+        uvw = np.array(dataset.uvw.data[start_row:end_row].compute()).tolist()
+        u = [uvw[i][0] for i in range(len(uvw))]
+        v = [uvw[i][1] for i in range(len(uvw))]
+        w = [uvw[i][2] for i in range(len(uvw))]
         
-        visibilities = visibilities[start_row:end_row].compute()
+        visibilities = np.array(visibilities[start_row:end_row].compute())
         visibilities = np.stack([visibilities.real, visibilities.imag], axis=-1)
-        weights = dataset.weight.data[start_row:end_row].compute()
-        flags = dataset.flag.data[start_row:end_row].compute()
+        weights = np.array(dataset.weight.data[start_row:end_row].compute())
+        flags = np.array(dataset.flag.data[start_row:end_row].compute())
 
         baseline_keys = [baseline_key(int(a1), int(a2)) for a1, a2 in zip(antenna1, antenna2)]
         
@@ -108,7 +108,7 @@ def extract_chunks(subms):
                 visibilities,
             )
 
-            yield chunk
+            yield chunk, subms.id
 
     except Exception as e:
         print(f"Error extracting subms chunks: {e}")
