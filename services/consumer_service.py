@@ -225,14 +225,14 @@ def process_streaming_batch(df_scientific, num_partitions, epoch_id, bda_config,
         
         # BDA processing
         df_averaged, df_windowed = apply_bda(df_scientific, num_partitions, bda_config)
-        bda_time = (time.time() - start_time) * 1000
-        print(f"[Batch {epoch_id}] BDA completed in {bda_time:.0f} ms")
+        bda_time = (time.time() - start_time)
+        print(f"[Batch {epoch_id}] BDA completed in {bda_time:.1f} seconds")
 
         # Gridding
         df_grid = apply_gridding(df_averaged, num_partitions, grid_config, strategy="PARTIAL")
-        total_time = (time.time() - start_time) * 1000
-        print(f"[Batch {epoch_id}] Gridding completed in {total_time:.0f} ms")
-        print(f"[Batch {epoch_id}] Total processing: {total_time:.0f} ms")
+        total_time = (time.time() - start_time)
+        print(f"[Batch {epoch_id}] Gridding completed in {total_time:.1f} seconds")
+        print(f"[Batch {epoch_id}] Total processing: {total_time:.1f} seconds")
 
         return df_grid, df_averaged, df_windowed
 
@@ -398,6 +398,8 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, dir
         grid, averaged, windowed = [], [], []
         stream_state = {'signal_received': False}
 
+        initial_time = time.time()
+
         def process_batch(df_scientific, epoch_id):    
             df_filtered, stream_ended = check_control_messages(df_scientific, epoch_id)
 
@@ -449,6 +451,9 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, dir
         if grid:
             print("[Consumer] ✓ Generating final dirty image...")
             combine_and_image(grid, num_partitions, grid_config, dirty_image_output, psf_output)
+            final_time = time.time()
+            total_time = final_time - initial_time
+            print(f"[Consumer] Total time from start to image generation: {total_time:.1f} seconds")
         else:
             print("[Consumer] No data processed, no image generated")
 
@@ -457,13 +462,13 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, dir
             df_averaged = reduce(DataFrame.unionByName, averaged)
             df_windowed = reduce(DataFrame.unionByName, windowed)
 
-            df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv = calculate_metrics(df_windowed, df_averaged, num_partitions)
-            consolidate_metrics(df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv, bda_config)
+            df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv, df_scientific, df_averaging = calculate_metrics(df_windowed, df_averaged, num_partitions)
+            consolidate_metrics(df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv, bda_config, df_scientific, df_averaging)
         else:
             print("[Consumer] No processed data samples available for metrics")
 
         print("[Consumer] Consumer finished processing")
-        
+
     except KeyboardInterrupt:
         print("[Consumer] Interrupted by user")
         

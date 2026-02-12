@@ -1,3 +1,4 @@
+import logging
 import sys
 import traceback
 import msgpack
@@ -25,7 +26,7 @@ src_path = project_root / "src"
 sys.path.append(str(src_path))
 
 from data.simulation import generate_dataset
-from data.extraction import stream_dataset
+from data.extraction import stream_dataset, setup_client
 
 # Supported padding strategies
 PADDING_STRATEGY = ["FIXED", "DERIVED"]
@@ -127,16 +128,16 @@ def create_kafka_producer(kafka_servers=None, **kwargs):
         'value_serializer': serialize_chunk,
         'key_serializer': lambda x: str(x).encode('utf-8') if x else None,
         'compression_type': 'lz4',
-        'batch_size': 10485760,
-        'linger_ms': 100,
-        'max_request_size': 10485760,
-        'buffer_memory': 536870912,
+        'batch_size': 104857600,        # 100 MB
+        'linger_ms': 500,               # 500 ms
+        'max_request_size': 104857600,  # 100 MB
+        'buffer_memory': 4294967296,    # 4 GB
         'enable_idempotence': True,
         'acks': "all",
-        'retries': 5,
+        'retries': 10,
         'max_in_flight_requests_per_connection': 1,
-        'request_timeout_ms': 30000,
-        'delivery_timeout_ms': 120000,
+        'request_timeout_ms': 120000,   # 120s
+        'delivery_timeout_ms': 600000,  # 600s = 10 min
         'metadata_max_age_ms': 300000,
     }
 
@@ -283,6 +284,7 @@ def run_producer(antenna_config_path, simulation_config_path, topic):
         Streaming results and metrics.
     """
     producer = None
+    client = None
     
     if topic is None:
         topic = DEFAULT_TOPIC
@@ -336,6 +338,9 @@ def run_producer(antenna_config_path, simulation_config_path, topic):
         producer = create_kafka_producer()
         print("✓ Kafka producer created.", flush=True)
 
+        client = setup_client()
+        print("✓ Dask client setup complete.", flush=True)
+
         streaming_results = stream_kafka(dataset, producer, topic)
         print("✓ Streaming complete.", flush=True)
 
@@ -351,6 +356,8 @@ def run_producer(antenna_config_path, simulation_config_path, topic):
             producer.flush()
             producer.close()
 
+        if client:
+            client.shutdown()
 
 def main():
     """
