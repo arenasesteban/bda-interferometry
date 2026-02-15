@@ -4,16 +4,14 @@ Consumer Service - Interferometry Data Processing
 This service consumes visibility data chunks from a Kafka topic, processes them using a distributed BDA pipeline and gridding, and generates dirty images.
 """
 
+import io
 import sys
 import argparse
 from pathlib import Path
 import time
 import traceback
-
-from yaml import scan
 import msgpack
 import numpy as np
-import zlib
 import uuid
 from functools import reduce
 import logging
@@ -21,7 +19,7 @@ import logging
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     StringType, StructType, StructField, IntegerType,
-    DoubleType, ArrayType, BooleanType
+    DoubleType, ArrayType
 )
 from pyspark.sql.functions import col, decode, trim
 from pyspark.sql import DataFrame
@@ -39,177 +37,171 @@ from evaluation.metrics import calculate_metrics, consolidate_metrics
 
 
 def define_visibility_schema():
-    """
-    Define the Spark schema for visibility data rows.
-    
-    Returns
-    -------
-    StructType
-        Spark schema for visibility data.
-    """
     return StructType([
-        StructField("subms_id", IntegerType(), True),
-        StructField("field_id", IntegerType(), True),
-        StructField("spw_id", IntegerType(), True),
-        StructField("polarization_id", IntegerType(), True),
-        StructField("chunk_id", StringType(), True),
+        StructField("block_id",         IntegerType(),  False),
+        StructField("subms_id",         IntegerType(),  False),
+        StructField("field_id",         IntegerType(),  False),
+        StructField("spw_id",           IntegerType(),  False),
+        StructField("polarization_id",  IntegerType(),  False),
         
-        StructField("baseline_key", StringType(), True),
-        StructField("antenna1", IntegerType(), True),
-        StructField("antenna2", IntegerType(), True),
-        StructField("scan_number", IntegerType(), True),
+        StructField("baseline_key",     StringType(),   False),
+        StructField("antenna1",         IntegerType(),  False),
+        StructField("antenna2",         IntegerType(),  False),
+        StructField("scan_number",      IntegerType(),  False),
         
-        StructField("exposure", DoubleType(), True),
-        StructField("interval", DoubleType(), True),
-        StructField("time", DoubleType(), True),
+        StructField("exposure",         DoubleType(),   False),
+        StructField("interval",         DoubleType(),   False),
+        StructField("time",             DoubleType(),   False),
 
-        StructField("n_channels", IntegerType(), True),
-        StructField("n_correlations", IntegerType(), True),
+        StructField("n_channels",       IntegerType(),  False),
+        StructField("n_correlations",   IntegerType(),  False),
 
-        StructField("u", DoubleType(), True),
-        StructField("v", DoubleType(), True),
-        StructField("w", DoubleType(), True),
+        StructField("u",                DoubleType(),   False),
+        StructField("v",                DoubleType(),   False),
+        StructField("w",                DoubleType(),   False),
 
-        StructField("visibility", ArrayType(ArrayType(ArrayType(DoubleType()))), True),
-        StructField("weight", ArrayType(ArrayType(DoubleType())), True),
-        StructField("flag", ArrayType(ArrayType(IntegerType())), True)
+        StructField("visibility",       ArrayType(ArrayType(ArrayType(DoubleType()))),  False),
+        StructField("weight",           ArrayType(ArrayType(DoubleType())),             False),
+        StructField("flag",             ArrayType(ArrayType(IntegerType())),            False)
     ])
 
 
-def deserialize_array(array_data):
-    if isinstance(array_data, dict):
-        array_type = array_data.get('type')
+def check_end_signal(df_scientific, epoch_id):
+    df_control = df_scientific.withColumn("key", trim(decode(col("key"), "UTF-8")))
+
+    end_signal = df_control.filter(col("key") == "__END__").limit(1).count() > 0
+    
+    if end_signal:
+        print(f"[Batch {epoch_id}] ✓ END_OF_STREAM signal detected in control messages")
+    
+    df_filtered = (df_control
+        .filter(col("key").isNull() | (col("key") != "__END__"))
+        .select("value", "headers")
+    )
+    
+    return df_filtered, end_signal
+
+
+def headers_to_dict(headers):
+    result = {}
+
+    for header in (headers or []):
+        key = header.key if isinstance(header.key, str) else header.key.decode("utf-8")
+        result[key] = bytes(header.value)
+    
+    return result
+
+
+def parse_metadata(headers_dict):
+    raw = headers_dict.get("metadata", None)
+    
+    if raw is None:
+        return {}
+    
+    return msgpack.unpackb(raw, raw=False)
+
+
+def deserialize_payload(value):
+    with io.BytesIO(value) as buffer:
+        npz = np.load(buffer, allow_pickle=True)
+        return {key: npz[key] for key in npz.files}
+    
+
+def assemble_block(metadata, arrays):
+    block = {
+        "block_id":         metadata["block_id"],
+        "subms_id":         metadata["subms_id"],
+        "field_id":         metadata["field_id"],
+        "spw_id":           metadata["spw_id"],
+        "polarization_id":  metadata["polarization_id"],
+
+        "n_channels":       metadata["n_channels"],
+        "n_correlations":   metadata["n_correlations"],
+
+        "antenna1":         np.asarray(arrays["antenna1"]),
+        "antenna2":         np.asarray(arrays["antenna2"]),
+        "scan_number":      np.asarray(arrays["scan_number"]),
         
-        if array_type == 'ndarray_compressed':
-            # Decompress and reconstruct
-            decompressed = zlib.decompress(array_data['data'])
-            dtype = np.dtype(array_data['dtype'])
-            shape = tuple(array_data['shape'])
-            return np.frombuffer(decompressed, dtype=dtype).reshape(shape)
+        "time":             np.asarray(arrays["time"]),
+        "exposure":         np.asarray(arrays["exposure"]),
+        "interval":         np.asarray(arrays["interval"]),
+        
+        "u":                np.asarray(arrays["u"]),
+        "v":                np.asarray(arrays["v"]),
+        "w":                np.asarray(arrays["w"]),
+    
+        "visibilities":     np.asarray(arrays["visibilities"]),
+        "weights":          np.asarray(arrays["weights"]),
+        "flags":            np.asarray(arrays["flags"])
+    }
+
+    return block
+
+
+def normalize_baseline(antenna1, antenna2):
+    return f"{min(antenna1, antenna2)}-{max(antenna1, antenna2)}"
+
+
+def process_rows(block):
+    rows = []
+
+    for i in range(len(block["antenna1"])):
+        row = {
+            "block_id":         int(block["block_id"]),
+            "subms_id":         int(block["subms_id"]),
+            "field_id":         int(block["field_id"]),
+            "spw_id":           int(block["spw_id"]),
+            "polarization_id":  int(block["polarization_id"]),
+
+            "n_channels":       int(block["n_channels"]),
+            "n_correlations":   int(block["n_correlations"]),
             
-        elif array_type == 'ndarray':
-            # Uncompressed array
-            dtype = np.dtype(array_data['dtype'])
-            shape = tuple(array_data['shape'])
-            return np.frombuffer(array_data['data'], dtype=dtype).reshape(shape)
-    
-    # If it's already a list/array, convert directly
-    return np.array(array_data)
+            "baseline_key":     normalize_baseline(block["antenna1"][i], block["antenna2"][i]),
+            "antenna1":         int(block["antenna1"][i]),
+            "antenna2":         int(block["antenna2"][i]),
+            "scan_number":      int(block["scan_number"][i]),
+
+            "time":             float(block["time"][i]),
+            "exposure":         float(block["exposure"][i]),
+            "interval":         float(block["interval"][i]),
+
+            "u":                float(block["u"][i]),
+            "v":                float(block["v"][i]),
+            "w":                float(block["w"][i]),
+
+            "visibility":       block["visibilities"][i].tolist(),
+            "weight":           block["weights"][i].tolist(),
+            "flag":             block["flags"][i].tolist()
+        }
+
+        rows.append(row)
+
+    return rows
 
 
-def process_chunk(chunk):
-    try:
-        # Extract metadata
-        subms_id = int(chunk.get('subms_id', -1))
-        field_id = int(chunk.get('field_id', -1))
-        spw_id = int(chunk.get('spw_id', -1)) 
-        polarization_id = int(chunk.get('polarization_id', -1))
-        chunk_id = chunk.get('chunk_id', -1)
-
-        # Extract measurement set info
-        baseline_keys = chunk.get('baseline_keys', [])
-        antenna1 = chunk.get('antenna1', [])
-        antenna2 = chunk.get('antenna2', [])
-        scan_number = chunk.get('scan_number', [])
-        
-        exposure = chunk.get('exposure', [])
-        interval = chunk.get('interval', [])
-        time = chunk.get('time', [])
-
-        n_channels = chunk.get('n_channels', 0)
-        n_correlations = chunk.get('n_correlations', 0)
-
-        u = chunk.get('u', [])
-        v = chunk.get('v', [])
-        w = chunk.get('w', [])
-
-        # Deserialize arrays
-        vs = deserialize_array(chunk.get('visibilities', []))
-        ws = deserialize_array(chunk.get('weights', []))
-        fs = deserialize_array(chunk.get('flags', []))
-
-        visibilities = vs.tolist()
-        weights = ws.tolist() if ws.size > 0 else []
-        flags = fs.astype(int).tolist() if fs.size > 0 else []
-
-        rows = []
-
-        for (bk, a1, a2, sc, ex, it, tm, uu, vv, ww, vs, ws, fs) in zip(
-            baseline_keys, antenna1, antenna2, scan_number, exposure, interval, time, u, v, w, visibilities, weights, flags
-        ):
-            row = {
-                'subms_id': subms_id,
-                'field_id': field_id,
-                'spw_id': spw_id,
-                'polarization_id': polarization_id,
-                'chunk_id': chunk_id,
-                'baseline_key': bk,
-                'antenna1': a1,
-                'antenna2': a2,
-                'scan_number': sc,
-                'exposure': ex,
-                'interval': it,
-                'time': tm,
-                'n_channels': n_channels,
-                'n_correlations': n_correlations,
-                'u': uu,
-                'v': vv,
-                'w': ww,
-                'visibility': vs,
-                'weight': ws if ws else [],
-                'flag': fs if fs else []
-            }
-
-            rows.append(row)
-
-        return rows
-    
-    except Exception as e:
-        print(f"[ERROR] Processing chunk: {e}")
-        traceback.print_exc()
-        raise
-
-
-def deserialize_rows(iterator):
-    all_rows = []
+def process_message(iterator):
+    batchs = []
 
     for message in iterator:
         try:
-            raw_data = message.chunk_data
-            chunk = msgpack.unpackb(raw_data, raw=False, strict_map_key=False)
+            headers_dict = headers_to_dict(message.headers or [])
+            metadata = parse_metadata(headers_dict)
 
-            all_rows.extend(process_chunk(chunk))
+            arrays = deserialize_payload(message.value)
+
+            block = assemble_block(metadata, arrays)
+
+            batchs.extend(process_rows(block))
 
         except Exception as e:
             print(f"[ERROR] Deserializing chunk: {e}")
             traceback.print_exc()
             raise
 
-    return iter(all_rows)
+    return iter(batchs)
 
 
-def process_streaming_batch(df_scientific, num_partitions, epoch_id, bda_config, grid_config):  
-    """
-    Process a microbatch of visibility data.
-
-    Parameters
-    ----------
-    df : DataFrame
-        Spark DataFrame containing visibility data for the microbatch.
-    epoch_id : int
-        Unique identifier for the microbatch.
-    num_partitions : int
-        Number of partitions for parallel processing.
-    bda_config : dict
-        Configuration for the BDA processing.
-    grid_config : dict
-        Configuration for the gridding process.
-
-    Returns
-    -------
-    DataFrame
-        DataFrame containing gridded visibilities.
-    """  
+def process_streaming_batch(df_scientific, num_partitions, epoch_id, bda_config, grid_config):
     start_time = time.time()
     
     try:       
@@ -218,10 +210,10 @@ def process_streaming_batch(df_scientific, num_partitions, epoch_id, bda_config,
         if row_count == 0:
             return None
         
-        chunk = df_scientific.select("chunk_id").distinct().collect()
+        blocks = df_scientific.select("block_id").distinct().collect()
 
-        for c in chunk:
-            print(f"[Batch {epoch_id}] Processing CHUNK ID - {c['chunk_id']}")
+        for block in blocks:
+            print(f"[Batch {epoch_id}] Processing Block {block['block_id']}")
         
         # BDA processing
         df_averaged, df_windowed = apply_bda(df_scientific, num_partitions, bda_config)
@@ -269,12 +261,6 @@ def create_spark_session():
 
 
 def create_kafka_stream(spark, bootstrap_server, topic):
-    """
-    Create and configure Kafka streaming DataFrame.
-    
-    Returns:
-        DataFrame: Configured Kafka stream
-    """
     kafka_df = spark \
         .readStream \
         .format("kafka") \
@@ -283,57 +269,14 @@ def create_kafka_stream(spark, bootstrap_server, topic):
         .option("startingOffsets", "earliest") \
         .option("failOnDataLoss", "false") \
         .option("maxOffsetsPerTrigger", "300") \
+        .option("includeHeaders", "true") \
         .load()
     
     return kafka_df.select(
-        kafka_df.key.alias("message_key"),
-        kafka_df.value.alias("chunk_data")
+        kafka_df.key.alias("key"),
+        kafka_df.value.alias("value"),
+        kafka_df.headers.alias("headers")
     )
-
-
-def check_control_messages(df_scientific, epoch_id):
-    df_control = df_scientific.withColumn("key", trim(decode(col("message_key"), "UTF-8")))
-
-    end_signal = df_control.filter(col("key") == "__CONTROL__").limit(1).count() > 0
-    
-    print(f"[Batch {epoch_id}] ✓ Checked control messages - END_OF_STREAM: {end_signal}")
-
-    df_filtered = (df_control
-        .filter(col("key").isNull() | (col("key") != "__CONTROL__"))
-        .select("chunk_data")
-    )
-    
-    return df_filtered, end_signal
-
-def wait_for_stream_completion(query, max_idle_time=15, check_interval=2):
-    print("[Consumer] ✓ END_OF_STREAM received, waiting for active batches...")
-    
-    last_activity_time = time.time()
-    last_batch_id = -1
-    
-    while True:
-        time.sleep(check_interval)
-        
-        try:
-            last_progress = query.lastProgress
-            
-            if last_progress:
-                current_batch_id = last_progress.get('batchId', -1)
-
-                if current_batch_id != last_batch_id:
-                    last_batch_id = current_batch_id
-                    last_activity_time = time.time()
-                    num_rows = last_progress.get('numInputRows', 0)
-                    print(f"[Consumer] Processing batch {current_batch_id} ({num_rows} rows)...")
-
-            idle_time = time.time() - last_activity_time
-            if idle_time > max_idle_time:
-                print(f"[Consumer] ✓ No new batches for {idle_time:.1f}s - all data processed")
-                break
-                
-        except Exception as e:
-            print(f"[WARN] Error checking query status: {e}")
-            break
 
 
 def combine_and_image(grid, num_partitions, grid_config, dirty_output, psf_output):
@@ -357,24 +300,6 @@ def combine_and_image(grid, num_partitions, grid_config, dirty_output, psf_outpu
 
 
 def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, dirty_image_output, psf_output):
-    """
-    Run the consumer service to process visibility data from Kafka.
-
-    Parameters
-    ----------
-    bootstrap_server : str
-        Kafka bootstrap server address.
-    topic : str
-        Kafka topic name.
-    bda_config : str
-        Path to BDA configuration file.
-    grid_config : str
-        Path to grid configuration file.
-
-    Returns
-    -------
-    None
-    """
     print("=" * 80)
     print(f"[Consumer] Starting service")
     print(f"[Consumer] Kafka: {bootstrap_server}")
@@ -401,13 +326,13 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, dir
         initial_time = time.time()
 
         def process_batch(df_scientific, epoch_id):    
-            df_filtered, stream_ended = check_control_messages(df_scientific, epoch_id)
+            df_filtered, stream_ended = check_end_signal(df_scientific, epoch_id)
 
             if df_filtered.isEmpty():
                 print(f"[Batch {epoch_id}] Empty after filtering, skipping")
                 return
             
-            deserialized_rdd = df_filtered.rdd.mapPartitions(deserialize_rows)
+            deserialized_rdd = df_filtered.rdd.mapPartitions(process_message)
             deserialized_df = spark.createDataFrame(deserialized_rdd, visibility_schema)
 
             df_grid, df_averaged, df_windowed = process_streaming_batch(deserialized_df, num_partitions, epoch_id, bda_config, grid_config)
@@ -483,7 +408,6 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, dir
 
 
 def main(): 
-    """Main entry point for consumer service."""
     parser = argparse.ArgumentParser(
         description="BDA Interferometry Consumer Service",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter

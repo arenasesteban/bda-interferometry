@@ -7,10 +7,6 @@ import traceback
 from astropy.constants import c
 import astropy.units as u
 
-# Kafka imports
-from kafka import KafkaProducer
-from kafka.errors import KafkaError
-
 # Configuration constants
 DEFAULT_KAFKA_SERVERS = ['localhost:9092']
 DEFAULT_TOPIC = 'visibility-stream'
