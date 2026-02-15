@@ -1,52 +1,71 @@
+import os
 import numpy as np
 import io
-import json
 import traceback
 import dask
-import dask.array as da
+
+import msgpack
 
 from dask.distributed import Client, get_worker
 from kafka import KafkaProducer
 
+ROWS_PER_BLOCK = 10_000
+
+
+def _encode_complex_array(array):
+    return {
+        "__complex_array__": True,
+        "real": array.real.astype(np.float32 if array.dtype == np.complex64 else np.float64),
+        "imag": array.imag.astype(np.float32 if array.dtype == np.complex64 else np.float64),
+        "dtype": str(array.dtype),
+        "shape": list(array.shape),
+    }
+
+
+def _default_encoder(data):
+    if isinstance(data, np.ndarray) and np.issubdtype(data.dtype, np.complexfloating):
+        return _encode_complex_array(data)
+    
+    if isinstance(data, np.ndarray):
+        return {
+            "__ndarray__": True, 
+            "data": data.tobytes(), 
+            "dtype": str(data.dtype), 
+            "shape": list(data.shape)
+        }
+    
+    if isinstance(data, np.integer):
+        return int(data)
+    
+    if isinstance(data, np.floating):
+        return float(data)
+    
+    raise TypeError(f"Cannot serialise object of type {type(data)}")
+
 
 def create_dask_client():
     try:
-        # ====================================================================
-        # DASK RESOURCE CONFIGURATION
-        # ====================================================================
-        # Cluster resources: 44 CPUs, 192 GB RAM
-        # 
-        # Current configuration:
-        # - n_workers: 11 workers
-        # - threads_per_worker: 4 threads
-        # - Total CPUs: 11 × 4 = 44 CPUs (100% utilization)
-        # - memory_limit: 16 GB per worker
-        # - Total RAM: 11 × 16 = 176 GB (92% utilization, 16 GB for OS)
-        #
-        # Memory thresholds (% of memory_limit per worker):
-        # - target (0.60): Start spilling to disk at 9.6 GB
-        # - spill (0.70): Aggressively spill to disk at 11.2 GB
-        # - pause (0.85): Pause accepting new tasks at 13.6 GB
-        # - terminate (0.95): Kill worker at 15.2 GB
-        # ====================================================================
-        
         dask.config.set({
-            "distributed.worker.memory.target": 0.60,
-            "distributed.worker.memory.spill": 0.70,
-            "distributed.worker.memory.pause": 0.85,
+            "distributed.worker.memory.target": 0.45,
+            "distributed.worker.memory.spill": 0.55,
+            "distributed.worker.memory.pause": 0.75,
             "distributed.worker.memory.terminate": 0.95,
+            "array.slicing.split_large_chunks": True,
         })
 
+        tmp = os.environ.get("DASK_DIR", "tmp/dask")
+
         client = Client(
-            n_workers=10,
+            n_workers=1,
             threads_per_worker=4,
-            memory_limit="22GB",
+            memory_limit="128GB",
             processes=True,
-            local_directory="/tmp/dask-worker-space",
+            local_directory=tmp,
         )
 
         print(f"[Producer] Dask client created: {client}")
         print(f"[Producer] Dashboard available at: {client.dashboard_link}")
+
         return client
     
     except Exception as e:
@@ -58,70 +77,67 @@ def create_dask_client():
 def create_kafka_producer():
     worker = get_worker()
 
-    producer_config = {
-        "bootstrap_servers": ["localhost:9092"],
-        "acks": "all",
-        "retries": 10,
-        "linger_ms": 50,
-        "batch_size": 1_048_576,            # 1 MB
-        "max_request_size": 10_485_760,     # 10 MB
-        "request_timeout_ms": 120_000,
-        "compression_type": "gzip",
-        "max_block_ms": 120_000,
-        "api_version_auto_timeout_ms": 30_000,
-    }
-
     if not hasattr(worker, "_kafka_producer"):
-        worker._kafka_producer = KafkaProducer(**producer_config)
+        worker._kafka_producer = KafkaProducer(
+            bootstrap_servers=["localhost:9092"],
+            acks="all",
+            retries=10,
+            linger_ms=50,
+            batch_size=1_048_576,            # 1 MB
+            max_request_size=10_485_760,     # 10 MB
+            request_timeout_ms=120_000,
+            delivery_timeout_ms=180_000,
+            compression_type="lz4",
+            max_block_ms=120_000,
+            api_version_auto_timeout_ms=30_000,
+        )
+
         print(f"[Producer] Kafka producer created on worker: {worker.name}")
 
     return worker._kafka_producer
 
 
-def select_fields(dataset):
-    antenna1 = dataset.antenna1.data
-    antenna2 = dataset.antenna2.data
-
-    time = dataset.time.data
-    exposure = dataset.dataset.EXPOSURE.data
-    interval = dataset.dataset.INTERVAL.data
-
-    uvw = dataset.uvw.data
-
-    visibilities = dataset.data.data
-    weights = dataset.weight.data
-    flags = dataset.flag.data
-
-    return visibilities, (
-        antenna1, antenna2,
-        time, exposure, interval,
-        uvw,
-        visibilities, weights, flags
-    )
-
-
-def build_payload(block):
+def close_kafka_producer():
     try:
-        buffer = io.BytesIO()
+        worker = get_worker()
 
+        if hasattr(worker, "_kafka_producer"):
+            worker._kafka_producer.flush()
+            worker._kafka_producer.close()
+
+    except Exception as e:
+        print(f"Error closing Kafka producer: {e}")
+        traceback.print_exc()
+        raise
+
+
+def build_payload(block, block_id, subms, n_channels, n_correlations):
+    try:
         data_arrays = {
-            "antenna1": np.asarray(block[0]),
-            "antenna2": np.asarray(block[1]),
-            "time": np.asarray(block[2]),
-            "exposure": np.asarray(block[3]),
-            "interval": np.asarray(block[4]),
-            "uvw": np.asarray(block[5]),
-            "visibilities": np.asarray(block[6]),
-            "weights": np.asarray(block[7]),
-            "flags": np.asarray(block[8])
+            "subms_id":         subms.id,
+            "field_id":         subms.field_id,
+            "spw_id":           subms.spw_id,
+            "polarization_id":  subms.polarization_id,
+            "chunk_id":         block_id,   
+            "n_channels":       n_channels,
+            "n_correlations":   n_correlations,
+            "antenna1":         np.asarray(block[0]),
+            "antenna2":         np.asarray(block[1]),
+            "scan_number":      np.asarray(block[2]),
+            "time":             np.asarray(block[3]),
+            "exposure":         np.asarray(block[4]),
+            "interval":         np.asarray(block[5]),
+            "uvw":              np.asarray(block[6]),
+            "visibilities":     np.asarray(block[7]),
+            "weights":          np.asarray(block[8]),
+            "flags":            np.asarray(block[9])
         }
 
-        np.savez_compressed(buffer, **data_arrays)
+        with io.BytesIO() as buffer:
+            np.savez_compressed(buffer, **data_arrays)
+            data = buffer.getvalue()
 
-        payload = buffer.getvalue()
-        buffer.close()
-
-        return payload
+        return msgpack.packb(data, default=_default_encoder, use_bin_type=True)
 
     except Exception as e:
         print(f"Error building payload: {e}")
@@ -129,32 +145,30 @@ def build_payload(block):
         raise
 
 
-def build_metadata(block_info, shape):
+def build_metadata(block_idx, blocks):
     try:
-        info = block_info[None]
-        block_id = info["chunk-location"]
-        array_location = info["array-location"]
-
-        row_start = array_location[0][0]
-        row_end = array_location[0][1]
-
-        metadata = {
-            "schema": "visibilities_blocks",
-            "block_id": list(block_id) if block_id is not None else None,
-            "block_shape": list(info["chunk-shape"]),
-            "array_location": [[int(s), int(e)] for s, e in array_location],
-            "row_range": [int(row_start), int(row_end)],
-            "n_rows": int(row_end - row_start),
-            "n_channels": int(shape[1]) if len(shape) > 1 else 0,
-            "n_correlations": int(shape[2]) if len(shape) > 2 else 0,
+        array_map = {
+            "antenna1":    blocks[0], "antenna2":   blocks[1], "scan_number": blocks[2],
+            "time":        blocks[3], "exposure":   blocks[4], "interval":    blocks[5],
+            "uvw":         blocks[6],
+            "visibilities": blocks[7], "weights":   blocks[8], "flags":       blocks[9],
         }
 
+        metadata = {
+            "schema":          "visibilities_blocks",
+            "block_idx":       int(block_idx),
+            "shapes":  {k: list(np.asarray(v).shape) for k, v in array_map.items()},
+            "dtypes":  {k: str(np.asarray(v).dtype)  for k, v in array_map.items()},
+        }
+
+        metadata_bytes = msgpack.packb(metadata, use_bin_type=True)
+
         headers = [
-            ("schema", b"visibilities_blocks"),
-            ("metadata", json.dumps(metadata).encode("utf-8"))
+            ("schema",          b"visibilities_blocks"),
+            ("metadata",        metadata_bytes),
         ]
-        
-        return headers, block_id, f"{row_start}_{row_end}"
+
+        return headers
     
     except Exception as e:
         print(f"Error building metadata: {e}")
@@ -162,65 +176,63 @@ def build_metadata(block_info, shape):
         raise
 
 
-def make_kafka_key(block_id, message_id):
-    block_str = ",".join(map(str, block_id))
-    return f"{message_id}|{block_str}".encode("utf-8")
-
-
-def produce_visibilities_block(*blocks, topic, block_info=None):
+def send_visibilities(*blocks, block_idx, subms, n_channels, n_correlations, topic):
     try:
-        if block_info is None:
-            return np.empty((0,), dtype=np.uint8) 
-
         producer = create_kafka_producer()
 
-        info = block_info[None]
-        block_id = info["chunk-location"]
+        payload = build_payload(blocks, block_idx, subms, n_channels, n_correlations)
+        headers = build_metadata(block_idx, blocks)
+        key     = f"block-{block_idx}".encode("utf-8")
 
-        payload = build_payload(blocks)
-        headers, block_id, rows_range = build_metadata(block_info, blocks[6].shape)        
-        key = make_kafka_key(block_id, message_id="visibilities_block")
+        producer.send(topic, key=key, value=payload, headers=headers).get(timeout=60)
+        print(f"[Producer] Sent block {block_idx}")
 
-        future = producer.send(topic, key=key, value=payload, headers=headers)
-        future.get(timeout=60)
 
-        block_id_str = ','.join(map(str, block_id)) if block_id else "unknown"
-        print(f"[Producer] Sent Block ID: {block_id_str}, Range: {rows_range}")
 
-        return np.ones((blocks[6].shape[0], ), dtype=np.uint8)
-    
+        return True
+
     except Exception as e:
-        print(f"Error producing block: {e}")
+        print(f"Error creating send_visibilities function: {e}")
         traceback.print_exc()
         raise
 
 
-def stream_dataset(dataset, topic):
+def stream_dataset(dataset, subms, topic):
+    client = None
+
     try:
         client = create_dask_client()
+        
+        nrows = dataset.rows
+        n_channels = dataset.data.shape[1]
+        n_correlations = dataset.data.shape[2]
 
-        data = select_fields(dataset)
+        for block_idx, row_start in enumerate(range(0, nrows, ROWS_PER_BLOCK)):
+            row_end = min(row_start + ROWS_PER_BLOCK, nrows)
 
-        dask.config.set(scheduler="distributed")
+            block = (
+                dataset.antenna1.data[row_start:row_end],
+                dataset.antenna2.data[row_start:row_end],
+                dataset.scan_number.data[row_start:row_end],
+                dataset.time.data[row_start:row_end],
+                dataset.dataset.EXPOSURE.data[row_start:row_end],
+                dataset.dataset.INTERVAL.data[row_start:row_end],
+                dataset.uvw.data[row_start:row_end],
+                dataset.data.data[row_start:row_end],
+                dataset.weight.data[row_start:row_end],
+                dataset.flag.data[row_start:row_end]
+            )
 
-        out = da.map_blocks(
-            produce_visibilities_block,
-            *data,
-            dtype=np.uint8,
-            drop_axis=(1, 2),
-            chunks=(data[6].chunks[0],),
-            topic=topic
-        )
-        print("[Producer] Resulting Dask array for streaming:", out)
+            task = dask.delayed(send_visibilities)(*block, block_idx=block_idx, subms=subms, n_channels=n_channels, n_correlations=n_correlations, topic=topic)
+            client.compute(task).result()
 
-        out.compute()
-
-        if client:
-            client.close()
-
-        return True
+            print(f"[Producer] Block {block_idx} sent (rows {row_start} to {row_end})")
 
     except Exception as e:
         print(f"Error streaming dataset: {e}")
         traceback.print_exc()
         raise
+
+    finally:
+        if client:
+            client.close()
