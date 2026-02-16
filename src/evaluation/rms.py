@@ -156,7 +156,35 @@ def sum_rms(df_rms):
         raise
 
 
-def calculate_rms_measure(df_rms, bda_config):
+def write_rms_results(
+    squared_difference, squared_scientific, denominator, 
+    rms_absolute, rms_relative, rms_relative_percent, 
+    tolerance, passed, 
+    output_file
+):
+    try:
+        with open(output_file, "w") as f:
+            f.write(f"\n{'=' * 80}\n")
+            f.write(f"RMS Error in Visibility Domain\n")
+            f.write(f"{'=' * 80}\n")
+            f.write(f"Results:\n")
+            f.write(f"  Σ|V_BDA - V_ref|²:   {squared_difference:.6e}\n")
+            f.write(f"  Σ|V_ref|²:           {squared_scientific:.6e}\n")
+            f.write(f"  N:                   {denominator:,}\n")
+            f.write(f"\nMetrics:\n")
+            f.write(f"  Absolute RMS:        {rms_absolute:.6e}\n")
+            f.write(f"  Relative RMS:        {rms_relative:.6f} ({rms_relative_percent:.4f}%)\n")
+            f.write(f"  Tolerance:           {tolerance:.6f} ({tolerance * 100:.4f}%)\n")
+            f.write(f"  Status:              {'✓ PASSED' if passed else '✗ FAILED'}\n")
+            f.write(f"{'=' * 80}\n")
+
+    except Exception as e:
+        print(f"Error writing RMS results: {e}")
+        traceback.print_exc()
+        raise
+
+
+def calculate_rms_measure(df_rms, bda_config, output_file):
     try:
         tolerance = bda_config.get('rms_tolerance', 0.1)
 
@@ -169,24 +197,12 @@ def calculate_rms_measure(df_rms, bda_config):
         
         passed = rms_relative <= tolerance
 
-        print(f"\n{'=' * 80}")
-        print(f"RMS Error in Visibility Domain")
-        print(f"{'=' * 80}")
-        print(f"Equation:")
-        print(f"  Absolute RMS:  sqrt( Σ|V_BDA - V_ref|² / N )")
-        print(f"  Relative RMS:  sqrt( Σ|V_BDA - V_ref|² / Σ|V_ref|² )")
-        print(f"")
-        print(f"Results:")
-        print(f"  Σ|V_BDA - V_ref|²:   {squared_difference:.6e}")
-        print(f"  Σ|V_ref|²:           {squared_scientific:.6e}")
-        print(f"  N:     {denominator:,}")
-        print(f"")
-        print(f"Metrics:")
-        print(f"  Absolute RMS:        {rms_absolute:.6e}")
-        print(f"  Relative RMS:        {rms_relative:.6f} ({rms_relative_percent:.4f}%)")
-        print(f"  Tolerance:          {tolerance:.6f} ({tolerance * 100:.4f}%)")
-        print(f"  Status:              {'✓ PASSED' if passed else '✗ FAILED'}")
-        print(f"{'=' * 80}\n")
+        write_rms_results(
+            squared_difference, squared_scientific, denominator,
+            rms_absolute, rms_relative, rms_relative_percent,
+            tolerance, passed,
+            output_file
+        )
         
     except Exception as e:
         print(f"Error calculating RMS measure: {e}")

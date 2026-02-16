@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 from pyspark.sql import functions as F
 
-def coberture_uv(df_scientific, df_averaging):
+def coverage_uv(df_scientific, df_averaging):
     try:
         df_uv_scientific = df_scientific.select(
             F.col('u').alias('u_scientific'),
@@ -20,31 +20,31 @@ def coberture_uv(df_scientific, df_averaging):
             F.col('v').alias('v_averaged')
         )
 
-        df_coberture_uv = df_uv_scientific.unionByName(df_uv_averaging)
+        df_coverage_uv = df_uv_scientific.unionByName(df_uv_averaging)
 
-        return df_coberture_uv
+        return df_coverage_uv
 
     except Exception as e:
-        print(f"Error calculating coberture UV: {e}")
+        print(f"Error calculating coverage UV: {e}")
         traceback.print_exc()
         raise
 
 
-def calculate_coberture_uv(df_coberture_uv, max_points=50000):
+def calculate_coverage_uv(df_coverage_uv, max_points=50000):
     try:
-        total_count = df_coberture_uv.count()
+        total_count = df_coverage_uv.count()
         print(f"Total UV points: {total_count:,}")
         
         sample_fraction = min(1.0, max_points / total_count) if total_count > 0 else 1.0
         
         if sample_fraction < 1.0:
             print(f"Sampling {sample_fraction:.1%} of data ({max_points:,} points) for visualization...")
-            df_sample = df_coberture_uv.sample(False, sample_fraction, seed=42)
+            df_sample = df_coverage_uv.sample(False, sample_fraction, seed=42)
         else:
             print("Using all data points for visualization...")
-            df_sample = df_coberture_uv
+            df_sample = df_coverage_uv
             print("Using all data points for visualization...")
-            df_sample = df_coberture_uv
+            df_sample = df_coverage_uv
         
         print("Preparing UV coordinates from scientific data...")
         uv_scientific = df_sample.select(
@@ -110,14 +110,8 @@ def calculate_coberture_uv(df_coberture_uv, max_points=50000):
         
         plt.savefig('uv_coverage_overlay.png', dpi=150, bbox_inches='tight')
         plt.close(fig)
-        
-        # Print quantitative statistics
-        print(f"\n{'='*80}")
-        print(f"UV Coverage")
-        print(f"Files generated: uv_coverage.png, uv_coverage_overlay.png")
-        print(f"{'='*80}")
 
     except Exception as e:
-        print(f"Error calculating coberture UV values: {e}")
+        print(f"Error calculating coverage UV values: {e}")
         traceback.print_exc()
         raise

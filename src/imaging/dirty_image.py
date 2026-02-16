@@ -16,9 +16,9 @@ def dataframe_to_grid(df_gridded, grid_config):
 
     df_gridded.unpersist()
 
-    u_coords, v_coords = pdf['u_pix'], pdf['v_pix']
-    vs_real, vs_imag = pdf['vs_real'], pdf['vs_imag']
-    weight = pdf['weight']
+    u_coords, v_coords = pdf["u_pix"], pdf["v_pix"]
+    vs_real, vs_imag = pdf["vs_real"], pdf["vs_imag"]
+    weight = pdf["weight"]
 
     grids = np.zeros((v_size, u_size), dtype=np.complex128)
     weights = np.zeros((v_size, u_size), dtype=np.float64)
@@ -31,7 +31,7 @@ def dataframe_to_grid(df_gridded, grid_config):
     return grids, weights
 
 
-def generate_dirty_image(df_gridded, grid_config, dirty_image_output, psf_output):
+def generate_dirty_image(df_gridded, grid_config, slurm_job_id):
     grids, weights = dataframe_to_grid(df_gridded, grid_config)
 
     img_size = grid_config["img_size"]
@@ -56,26 +56,30 @@ def generate_dirty_image(df_gridded, grid_config, dirty_image_output, psf_output
 
     psf_image = psf_image * grid_size[0] * grid_size[1]
 
-    save_dirty_image(dirty_image, dirty_image_output)
-    save_psf_image(psf_image, psf_output)
+    output_dirty_image = f"./output/dirtyimage_{slurm_job_id}.png"
+    output_psf_image = f"./output/psf_{slurm_job_id}.png"
 
+    save_dirty_image(dirty_image, output_dirty_image)
+    save_psf_image(psf_image, output_psf_image)
+
+    return output_dirty_image, output_psf_image
 
 def save_dirty_image(dirty_image, output_file):
     plt.figure(figsize=(8, 8))
-    plt.imshow(dirty_image, cmap='cmc.acton', origin='lower')
-    plt.title('Dirty Image - BDA', fontdict={'fontsize': 16, 'fontweight': 'bold'})
-    plt.xlabel('X [pixels]')
-    plt.ylabel('Y [pixels]')
+    plt.imshow(dirty_image, cmap="cmc.acton", origin="lower")
+    plt.title("Dirty Image", fontdict={"fontsize": 16, "fontweight": "bold"})
+    plt.xlabel("X [pixels]")
+    plt.ylabel("Y [pixels]")
     plt.savefig(output_file)
     plt.close()
 
 
 def save_psf_image(psf_image, output_file):
     plt.figure(figsize=(8, 8))
-    plt.imshow(psf_image, cmap='cmc.acton', origin='lower')
-    plt.colorbar(label='Intensity')
-    plt.title('Point Spread Function (PSF) - BDA', fontdict={'fontsize': 16, 'fontweight': 'bold'})
-    plt.xlabel('X [pixels]')
-    plt.ylabel('Y [pixels]')
+    plt.imshow(psf_image, cmap="cmc.acton", origin="lower")
+    plt.colorbar(label="Intensity")
+    plt.title("Point Spread Function (PSF)", fontdict={"fontsize": 16, "fontweight": "bold"})
+    plt.xlabel("X [pixels]")
+    plt.ylabel("Y [pixels]")
     plt.savefig(output_file)
     plt.close()

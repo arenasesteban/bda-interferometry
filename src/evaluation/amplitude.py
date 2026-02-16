@@ -138,44 +138,69 @@ def sum_amplitudes(df_amplitude):
         raise
 
 
-def calculate_amplitude_error(df_amplitude, bda_config):
+def write_amplitude_results(
+    results_amplitude, 
+    flux_scientific, flux_averaging, 
+    relative_error, relative_error_percent, 
+    tolerance, passed, 
+    output_file
+):
+    try:
+        with open(output_file, "w") as f:
+            f.write(f"{'=' * 80}\n")
+            f.write(f"Amplitude Error\n")
+            f.write(f"{'=' * 80}\n")
+            f.write(f"Equation:\n")
+            f.write(f"  |A_BDA - A_orig| / |A_orig|\n")
+            f.write(f"\n")
+            f.write(f"Original Data:\n")
+            f.write(f"  Σ Re:                {results_amplitude[0]:.6e}\n")
+            f.write(f"  Σ Im:                {results_amplitude[1]:.6e}\n")
+            f.write(f"  Total Flux:          {flux_scientific:.6e}\n")
+            f.write(f"  N valid:             {results_amplitude[2]:,}\n")
+            f.write(f"\n")
+            f.write(f"Data with BDA:\n")
+            f.write(f"  Σ Re:                {results_amplitude[3]:.6e}\n")
+            f.write(f"  Σ Im:                {results_amplitude[4]:.6e}\n")
+            f.write(f"  Total Flux:          {flux_averaging:.6e}\n")
+            f.write(f"  N valid:             {results_amplitude[5]:,}\n")
+            f.write(f"\n")
+            f.write(f"Error Metric:\n")
+            f.write(f"  Relative Error:      {relative_error:.6f} ({relative_error_percent:.4f}%)\n")
+            f.write(f"  Tolerance:           {tolerance:.6f} ({tolerance * 100.0:.4f}%)\n")
+            f.write(f"  Status:              {'✓ PASSED' if passed else '✗ FAILED'}\n")
+            f.write(f"{'=' * 80}\n")
+
+    except Exception as e:
+        print(f"Error writing amplitude results: {e}")
+        traceback.print_exc()
+        raise
+
+
+def calculate_amplitude_error(df_amplitude, bda_config, output_file):
     try:
         tolerance = bda_config.get('amplitude_tolerance', 0.1)
 
-        (sum_real_sci, sum_imag_sci, n_valid_sci,
-         sum_real_avg, sum_imag_avg, n_valid_avg) = sum_amplitudes(df_amplitude)
+        results_amplitude = sum_amplitudes(df_amplitude)
 
-        flux_total_scientific = np.sqrt(sum_real_sci**2 + sum_imag_sci**2)
-        flux_total_averaging = np.sqrt(sum_real_avg**2 + sum_imag_avg**2)
+        (sum_real_sci, sum_imag_sci, n_valid_sci,
+         sum_real_avg, sum_imag_avg, n_valid_avg) = results_amplitude
+
+        flux_scientific = np.sqrt(sum_real_sci**2 + sum_imag_sci**2)
+        flux_averaging = np.sqrt(sum_real_avg**2 + sum_imag_avg**2)
         
-        relative_error = abs(flux_total_averaging - flux_total_scientific) / abs(flux_total_scientific)
+        relative_error = abs(flux_averaging - flux_scientific) / abs(flux_scientific)
         relative_error_percent = relative_error * 100.0
 
         passed = relative_error <= tolerance
 
-        print(f"\n{'=' * 80}")
-        print(f"Amplitude Error")
-        print(f"{'=' * 80}")
-        print(f"Equation:")
-        print(f"  |A_BDA - A_orig| / |A_orig|")
-        print(f"")
-        print(f"Original Data (no BDA):")
-        print(f"  Σ Re:              {sum_real_sci:.6e}")
-        print(f"  Σ Im:              {sum_imag_sci:.6e}")
-        print(f"  Total Flux:       {flux_total_scientific:.6e}")
-        print(f"  N valid:         {n_valid_sci:,}")
-        print(f"")
-        print(f"Data with BDA:")
-        print(f"  Σ Re:              {sum_real_avg:.6e}")
-        print(f"  Σ Im:              {sum_imag_avg:.6e}")
-        print(f"  Total Flux:       {flux_total_averaging:.6e}")
-        print(f"  N valid:         {n_valid_avg:,}")
-        print(f"")
-        print(f"Error Metric:")
-        print(f"  Relative Error:    {relative_error:.6f} ({relative_error_percent:.4f}%)")
-        print(f"  Tolerance:        {tolerance:.6f} ({tolerance * 100.0:.4f}%)")
-        print(f"  Status:            {'✓ PASSED' if passed else '✗ FAILED'}")
-        print(f"{'=' * 80}\n")
+        write_amplitude_results(
+            results_amplitude, 
+            flux_scientific, flux_averaging, 
+            relative_error, relative_error_percent, 
+            tolerance, passed, 
+            output_file
+        )
 
     except Exception as e:
         print(f"Error comparing amplitudes: {e}")
