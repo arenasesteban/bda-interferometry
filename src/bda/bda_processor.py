@@ -132,7 +132,7 @@ def average_by_window(df):
             StructField('u', DoubleType(), True),
             StructField('v', DoubleType(), True),
             
-            StructField('visibilities', ArrayType(ArrayType(ArrayType(DoubleType()))), True),
+            StructField('visibility', ArrayType(ArrayType(ArrayType(DoubleType()))), True),
             StructField('weight', (ArrayType(ArrayType(DoubleType()))), True),
             StructField('flag', ArrayType(ArrayType(IntegerType())), True)
         ])
@@ -206,7 +206,7 @@ def average_by_window(df):
                 ws_avg = ws_sum / N
                 fs_avg = (ws_sum == 0).astype(np.int32)
 
-                bda_avg['visibilities'] = vs_avg.tolist()
+                bda_avg['visibility'] = vs_avg.tolist()
                 bda_avg['weight'] = ws_avg.tolist()
                 bda_avg['flag'] = fs_avg.tolist()
 

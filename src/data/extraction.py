@@ -203,8 +203,8 @@ def stream_dataset(dataset, subms, topic):
             "field_id":         subms.field_id,
             "spw_id":           subms.spw_id,
             "polarization_id":  subms.polarization_id,
-            "n_correlations":   dataset.data.shape[1],
-            "n_channels":       dataset.data.shape[2],
+            "n_channels":       dataset.data.shape[1],
+            "n_correlations":   dataset.data.shape[2],
         }
 
         for block_idx, row_start in enumerate(range(0, nrows, ROWS_PER_BLOCK)):

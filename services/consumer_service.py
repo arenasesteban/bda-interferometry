@@ -279,7 +279,7 @@ def create_kafka_stream(spark, bootstrap_server, topic):
     )
 
 
-def combine_and_image(grid, num_partitions, grid_config, dirty_output, psf_output):
+def combine_and_image(grid, num_partitions, grid_config, slurm_job_id):
     if not grid:
         print("[Imaging] No data to process")
         return False
@@ -291,15 +291,13 @@ def combine_and_image(grid, num_partitions, grid_config, dirty_output, psf_outpu
     df_gridded = apply_gridding(df_gridded, num_partitions, grid_config, strategy="COMPLETE")
     
     print("[Imaging] Generating dirty image...")
-    generate_dirty_image(df_gridded, grid_config, dirty_output, psf_output)
+    output_dirty_image, output_psf_image = generate_dirty_image(df_gridded, grid_config, slurm_job_id)
     
-    print(f"[Imaging] ✓ Dirty image saved to: {dirty_output}")
-    print(f"[Imaging] ✓ PSF image saved to: {psf_output}")
-    
-    return True
+    print(f"[Imaging] ✓ Dirty image saved to: {output_dirty_image}")
+    print(f"[Imaging] ✓ PSF image saved to: {output_psf_image}")
 
 
-def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, dirty_image_output, psf_output):
+def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slurm_job_id):
     print("=" * 80)
     print(f"[Consumer] Starting service")
     print(f"[Consumer] Kafka: {bootstrap_server}")
@@ -375,7 +373,7 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, dir
         # Generate final image
         if grid:
             print("[Consumer] ✓ Generating final dirty image...")
-            combine_and_image(grid, num_partitions, grid_config, dirty_image_output, psf_output)
+            combine_and_image(grid, num_partitions, grid_config, slurm_job_id)
             final_time = time.time()
             total_time = final_time - initial_time
             print(f"[Consumer] Total time from start to image generation: {total_time:.1f} seconds")
@@ -388,7 +386,7 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, dir
             df_windowed = reduce(DataFrame.unionByName, windowed)
 
             df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv, df_scientific, df_averaging = calculate_metrics(df_windowed, df_averaged, num_partitions)
-            consolidate_metrics(df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv, bda_config, df_scientific, df_averaging)
+            consolidate_metrics(df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv, bda_config, df_scientific, df_averaging, slurm_job_id)
         else:
             print("[Consumer] No processed data samples available for metrics")
 
@@ -434,14 +432,9 @@ def main():
         help="Path to grid configuration JSON file"
     )
     parser.add_argument(
-        "--dirty-image-output",
-        default="./output/dirty_image.png",
-        help="Path for dirty image output file"
-    )
-    parser.add_argument(
-        "--psf-output",
-        default="./output/psf.png",
-        help="Path for PSF output file"
+        "--slurm_job_id",
+        default="default_job",
+        help="Unique identifier for this job"
     )
 
     args = parser.parse_args()
@@ -452,9 +445,9 @@ def main():
             topic=args.topic,
             bda_config_path=args.bda_config,
             grid_config_path=args.grid_config,
-            dirty_image_output=args.dirty_image_output,
-            psf_output=args.psf_output
+            slurm_job_id=args.job_id,
         )
+
     except Exception as e:
         print(f"[FATAL] Consumer failed: {e}")
         traceback.print_exc()
