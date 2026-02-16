@@ -27,7 +27,7 @@ def create_dask_client():
         client = Client(
             n_workers           = 1,
             threads_per_worker  = 4,
-            memory_limit        = "128GB",
+            memory_limit        = "160GB",
             processes           = True,
             local_directory     = tmp,
         )
@@ -80,6 +80,13 @@ def close_kafka_producer():
         raise
 
 
+def iter_rows(nrows: int, rows_per_msg: int):
+    for start in range(0, nrows, rows_per_msg):
+        end = min(start + rows_per_msg, nrows)
+
+        yield start, end
+
+
 def build_payload(block):
     try:
         vs = np.asarray(block[7])
@@ -109,11 +116,11 @@ def build_payload(block):
         raise
 
 
-def build_metadata(block_idx, data):
+def build_metadata(message_id, data):
     try:
         metadata = {
             "schema":           "visibilities_blocks",
-            "block_id":         int(block_idx),   
+            "message_id":       message_id,
             "subms_id":         int(data["subms_id"]),
             "field_id":         int(data["field_id"]),
             "spw_id":           int(data["spw_id"]),
@@ -137,15 +144,32 @@ def build_metadata(block_idx, data):
         raise
 
 
-def send_visibilities(*blocks, block_idx, data, topic):
+def send_visibilities(*blocks, chunk_id, data, nrows, topic):
     try:
         producer = create_kafka_producer()
 
-        payload = build_payload(blocks)
-        headers = build_metadata(block_idx, data)
-        key     = f"block-{block_idx}".encode("utf-8")
+        for block_idx, (start, end) in enumerate(iter_rows(nrows, ROWS_PER_BLOCK)):
+            block = (
+                blocks[0][start:end],
+                blocks[1][start:end],
+                blocks[2][start:end],
+                blocks[3][start:end],
+                blocks[4][start:end],
+                blocks[5][start:end],
+                blocks[6][start:end],
+                blocks[7][start:end],
+                blocks[8][start:end],
+                blocks[9][start:end],
+            )
 
-        producer.send(topic, key=key, value=payload, headers=headers).get(timeout=60)
+            message_id = f"{chunk_id}-{block_idx}"
+            payload = build_payload(block)
+            headers = build_metadata(message_id, data)
+            key     = f"message-{message_id}".encode("utf-8")
+
+            producer.send(topic, key=key, value=payload, headers=headers).get(timeout=60)
+
+            print(f"[Producer] Block {block_idx} | Chunk {chunk_id} sent (rows {start} to {end})", flush=True)
 
         return True
 
@@ -207,27 +231,35 @@ def stream_dataset(dataset, subms, topic):
             "n_correlations":   dataset.data.shape[2],
         }
 
-        for block_idx, row_start in enumerate(range(0, nrows, ROWS_PER_BLOCK)):
-            row_end = min(row_start + ROWS_PER_BLOCK, nrows)
+        print(f"[Extraction] Dataset chunks: {dataset.data.data.chunks[0]}")
 
-            block = (
-                dataset.antenna1.data[row_start:row_end],
-                dataset.antenna2.data[row_start:row_end],
-                dataset.scan_number.data[row_start:row_end],
-                dataset.time.data[row_start:row_end],
-                dataset.dataset.EXPOSURE.data[row_start:row_end],
-                dataset.dataset.INTERVAL.data[row_start:row_end],
-                dataset.uvw.data[row_start:row_end],
-                dataset.data.data[row_start:row_end],
-                dataset.weight.data[row_start:row_end],
-                dataset.flag.data[row_start:row_end]
-            )
+        arrays = (
+            dataset.antenna1.data,
+            dataset.antenna2.data,
+            dataset.scan_number.data,
+            dataset.time.data,
+            dataset.dataset.EXPOSURE.data,
+            dataset.dataset.INTERVAL.data,
+            dataset.uvw.data,
+            dataset.data.data,
+            dataset.weight.data,
+            dataset.flag.data
+        )
 
-            task = dask.delayed(send_visibilities)(*block, block_idx=block_idx, data=data, topic=topic)
-            client.compute(task).result()
+        blocks = [a.to_delayed().ravel() for a in arrays]
 
-            print(f"[Producer] Block {block_idx} sent (rows {row_start} to {row_end})", flush=True)
+        nchunks = len(blocks[0])
 
+        tasks = []
+        for chunk_id in range(nchunks):
+            chunk_blocks = [block[chunk_id] for block in blocks]
+            
+            task = dask.delayed(send_visibilities)(*chunk_blocks, chunk_id=chunk_id, data=data, nrows=nrows, topic=topic)
+            tasks.append(task)
+        
+        futures = client.compute(tasks)
+        client.gather(futures)
+            
         send_end_signal(topic, len(range(0, nrows, ROWS_PER_BLOCK)))
 
     except Exception as e:

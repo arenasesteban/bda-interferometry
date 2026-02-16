@@ -5,6 +5,7 @@ import datetime
 import traceback
 
 from pyralysis.io.antenna_config_io import AntennaConfigurationIo
+from pyralysis.simulation.antenna_configs import get_ska_station_list
 from pyralysis.models.sky import PointSource, CompositeSource, NonParametricSource
 from pyralysis.simulation.core import Simulator
 from pyralysis.io.fits import FITS
@@ -41,6 +42,18 @@ def load_antenna_configuration(antenna_config_path):
     
     except Exception as e:
         print(f"Error in load_antenna_configuration: {e}")
+        traceback.print_exc()
+        raise
+
+
+def filter_antenna_configuration(interferometer, array_type, assembly):
+    try:
+        if assembly != "AA4":
+            array_ids = get_ska_station_list(array_type, assembly)
+            interferometer.antenna_array.filter_by_ids(array_ids, inplace=True)
+    
+    except Exception as e:
+        print(f"Error in filter_antenna_configuration: {e}")
         traceback.print_exc()
         raise
 
@@ -224,7 +237,7 @@ def simulate_dataset(interferometer, sources):
     return dataset
 
 
-def generate_dataset(antenna_config_path,
+def generate_dataset(antenna_config_path, sim_config,
                      freq_min, freq_max, n_chans, 
                      observation_time, declination, integration_time,
                      source_path=None, date_string=None,
@@ -258,7 +271,19 @@ def generate_dataset(antenna_config_path,
     """
     # Load antenna configuration
     interferometer = load_antenna_configuration(antenna_config_path)
-    
+
+
+    if sim_config["interferometer"] == "SKA":
+        filter_antenna_configuration(interferometer, sim_config["array_type"], sim_config["assembly"])
+
+    interferometer_name = f"{sim_config['interferometer']} {sim_config['array_type'] + ' ' + sim_config['assembly'] if sim_config['interferometer'] == 'SKA' else ''}"
+    n_antennas = interferometer.antenna_array.positions.shape[0]
+    n_baselines = n_antennas * (n_antennas - 1) // 2
+
+    print(f"[Simulation] Interferometer - {interferometer_name}", flush=True)
+    print(f"[Simulation] Antenna positions: {n_antennas}", flush=True)
+    print(f"[Simulation] Number of baselines: {n_baselines}", flush=True)
+
     # Configure observation parameters
     freq, ref_freq = configure_observation(
         interferometer,

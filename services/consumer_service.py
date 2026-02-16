@@ -38,7 +38,7 @@ from evaluation.metrics import calculate_metrics, consolidate_metrics
 
 def define_visibility_schema():
     return StructType([
-        StructField("block_id",         IntegerType(),  False),
+        StructField("message_id",       StringType(),   False),
         StructField("subms_id",         IntegerType(),  False),
         StructField("field_id",         IntegerType(),  False),
         StructField("spw_id",           IntegerType(),  False),
@@ -109,7 +109,7 @@ def deserialize_payload(value):
 
 def assemble_block(metadata, arrays):
     block = {
-        "block_id":         metadata["block_id"],
+        "message_id":       metadata["message_id"],
         "subms_id":         metadata["subms_id"],
         "field_id":         metadata["field_id"],
         "spw_id":           metadata["spw_id"],
@@ -147,7 +147,7 @@ def process_rows(block):
 
     for i in range(len(block["antenna1"])):
         row = {
-            "block_id":         int(block["block_id"]),
+            "message_id":       block["message_id"],
             "subms_id":         int(block["subms_id"]),
             "field_id":         int(block["field_id"]),
             "spw_id":           int(block["spw_id"]),
@@ -210,10 +210,10 @@ def process_streaming_batch(df_scientific, num_partitions, epoch_id, bda_config,
         if row_count == 0:
             return None
         
-        blocks = df_scientific.select("block_id").distinct().collect()
+        blocks = df_scientific.select("message_id").distinct().collect()
 
         for block in blocks:
-            print(f"[Batch {epoch_id}] Processing Block {block['block_id']}")
+            print(f"[Batch {epoch_id}] Processing Message {block['message_id']}")
         
         # BDA processing
         df_averaged, df_windowed = apply_bda(df_scientific, num_partitions, bda_config)

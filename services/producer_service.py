@@ -109,6 +109,7 @@ def run_producer(antenna_config_path, simulation_config_path, topic):
         if "source_path" in sim_config:
             dataset = generate_dataset(
                 antenna_config_path=antenna_config_path,
+                sim_config=sim_config,
                 freq_min=sim_config["freq_min"],
                 freq_max=sim_config["freq_max"],
                 n_chans=sim_config["n_chans"],
