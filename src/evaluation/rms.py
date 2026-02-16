@@ -26,7 +26,7 @@ def aggregate_reference_visibilities(df_scientific):
         schema = StructType([
             StructField("baseline_key", StringType(), False),
             StructField("window_id", LongType(), False),
-            StructField("visibilities", ArrayType(ArrayType(ArrayType(DoubleType()))), False),
+            StructField("visibility", ArrayType(ArrayType(ArrayType(DoubleType()))), False),
         ])
 
         def compute_reference(pdf):
@@ -35,7 +35,7 @@ def aggregate_reference_visibilities(df_scientific):
 
             vs_list = []
 
-            for vs_data, fs_data in zip(pdf['visibilities'], pdf['flag']):
+            for vs_data, fs_data in zip(pdf['visibility'], pdf['flag']):
                 vs = np.array([[corr for corr in chan] for chan in vs_data], dtype=np.float64)
                 fs = np.array([[f for f in chan] for chan in fs_data], dtype=np.bool_)
                 
@@ -45,14 +45,14 @@ def aggregate_reference_visibilities(df_scientific):
                 vs_list.append(vs_masked)
             
             vs_stacked = np.stack(vs_list, axis=0)
-            visibilities_ref = np.nanmean(vs_stacked, axis=0)
+            visibility_ref = np.nanmean(vs_stacked, axis=0)
             
-            visibilities_ref = np.nan_to_num(visibilities_ref, nan=0.0)
+            visibility_ref = np.nan_to_num(visibility_ref, nan=0.0)
 
             return pd.DataFrame([{
                 'baseline_key': baseline_key,
                 'window_id': window_id,
-                'visibilities': visibilities_ref.tolist()
+                'visibility': visibility_ref.tolist()
             }])
 
         
@@ -70,12 +70,12 @@ def combine_for_rms(df_reference, df_averaging):
     try:
         df_reference = df_reference.select(
             "baseline_key", "window_id",
-            df_reference["visibilities"].alias("visibilities_scientific"),
+            df_reference["visibility"].alias("visibility_scientific"),
         )
 
         df_averaging = df_averaging.select(
             "baseline_key", "window_id",
-            df_averaging["visibilities"].alias("visibilities_averaging"),
+            df_averaging["visibility"].alias("visibility_averaging"),
         )
 
         df_combined = df_reference.join(
@@ -109,7 +109,7 @@ def calculate_rms_error(df_combined):
             squared_scientific = 0.0
             denominator = 0
 
-            for vs_scientific_data, vs_averaging_data in zip(pdf["visibilities_scientific"], pdf["visibilities_averaging"]):
+            for vs_scientific_data, vs_averaging_data in zip(pdf["visibility_scientific"], pdf["visibility_averaging"]):
                 vs_scientific = np.array([[corr for corr in chan] for chan in vs_scientific_data], dtype=np.float64)
                 vs_averaging = np.array([[corr for corr in chan] for chan in vs_averaging_data], dtype=np.float64)
 
@@ -163,7 +163,7 @@ def write_rms_results(
     output_file
 ):
     try:
-        with open(output_file, "w") as f:
+        with open(output_file, "a") as f:
             f.write(f"\n{'=' * 80}\n")
             f.write(f"RMS Error in Visibility Domain\n")
             f.write(f"{'=' * 80}\n")
@@ -203,6 +203,8 @@ def calculate_rms_measure(df_rms, bda_config, output_file):
             tolerance, passed,
             output_file
         )
+
+        print("[Metrics] ✓ RMS Error completed successfully.")
         
     except Exception as e:
         print(f"Error calculating RMS measure: {e}")

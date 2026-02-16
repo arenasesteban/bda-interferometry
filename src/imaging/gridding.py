@@ -50,7 +50,7 @@ def prepare_gridding(scientific_df):
         F.col("v"),
         F.col("n_channels"),
         F.col("n_correlations"),
-        F.col("visibilities"),
+        F.col("visibility"),
         F.col("weight"),
         F.col("flag"),
         F.lit(False).alias("is_hermitian")
@@ -62,7 +62,7 @@ def prepare_gridding(scientific_df):
         (-F.col("v")).alias("v"),
         F.col("n_channels"),
         F.col("n_correlations"),
-        F.col("visibilities"),
+        F.col("visibility"),
         F.col("weight"),
         F.col("flag"),
         F.lit(True).alias("is_hermitian")
@@ -118,7 +118,7 @@ def accumulate_grid(scientific_df, grid_config):
 def process_visibility(row, chan_freq, corrs_map, uvcellsize, padded_size):
     try:
         u, v = row.u, row.v
-        visibilities = row.visibilities
+        visibilities = row.visibility
         weights = row.weight
         flags = row.flag
         

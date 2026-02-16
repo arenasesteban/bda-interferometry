@@ -68,6 +68,7 @@ def consolidate_metrics(df_amplitude, df_rms, df_baseline_dependency, df_coverag
         try:
             if df_scientific is not None:
                 df_scientific.unpersist()
+                
             if df_averaging is not None:
                 df_averaging.unpersist()
 

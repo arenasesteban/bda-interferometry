@@ -30,31 +30,16 @@ def coverage_uv(df_scientific, df_averaging):
         raise
 
 
-def calculate_coverage_uv(df_coverage_uv, max_points=50000):
+def calculate_coverage_uv(df_coverage_uv, output_coverage):
     try:
-        total_count = df_coverage_uv.count()
-        print(f"Total UV points: {total_count:,}")
-        
-        sample_fraction = min(1.0, max_points / total_count) if total_count > 0 else 1.0
-        
-        if sample_fraction < 1.0:
-            print(f"Sampling {sample_fraction:.1%} of data ({max_points:,} points) for visualization...")
-            df_sample = df_coverage_uv.sample(False, sample_fraction, seed=42)
-        else:
-            print("Using all data points for visualization...")
-            df_sample = df_coverage_uv
-            print("Using all data points for visualization...")
-            df_sample = df_coverage_uv
-        
-        print("Preparing UV coordinates from scientific data...")
-        uv_scientific = df_sample.select(
+        uv_scientific = df_coverage_uv.select(
             (F.col('u_scientific') / 1000).alias('u_scientific'),
             (F.col('v_scientific') / 1000).alias('v_scientific')
         ).filter(
             F.col('u_scientific').isNotNull() & F.col('v_scientific').isNotNull()
         ).collect()
         
-        uv_averaging = df_sample.select(
+        uv_averaging = df_coverage_uv.select(
             (F.col('u_averaged') / 1000).alias('u_averaged'),
             (F.col('v_averaged') / 1000).alias('v_averaged')
         ).filter(
@@ -89,7 +74,7 @@ def calculate_coverage_uv(df_coverage_uv, max_points=50000):
         
         plt.tight_layout()
         
-        plt.savefig('uv_coverage.png', dpi=150, bbox_inches='tight')
+        plt.savefig(output_coverage, dpi=150, bbox_inches='tight')
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(8, 8))
@@ -108,8 +93,10 @@ def calculate_coverage_uv(df_coverage_uv, max_points=50000):
         
         plt.tight_layout()
         
-        plt.savefig('uv_coverage_overlay.png', dpi=150, bbox_inches='tight')
+        plt.savefig(output_coverage.replace('.png', '_overlay.png'), dpi=150, bbox_inches='tight')
         plt.close(fig)
+
+        print("[Metrics] ✓ UV Coverage visualization completed successfully.")
 
     except Exception as e:
         print(f"Error calculating coverage UV values: {e}")

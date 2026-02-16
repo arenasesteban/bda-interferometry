@@ -38,7 +38,7 @@ def calculate_amplitude(df_scientific):
             sum_imag = 0.0
             n_valid = 0
 
-            for vs_data, fs_data in zip(pdf["visibilities"], pdf["flag"]):
+            for vs_data, fs_data in zip(pdf["visibility"], pdf["flag"]):
                 vs = np.array([[corr for corr in chan] for chan in vs_data], dtype=np.float64)     # (C, P, 2)
                 fs = np.array([[flag for flag in chan] for chan in fs_data], dtype=np.bool_)       # (C, P)
 
@@ -146,7 +146,7 @@ def write_amplitude_results(
     output_file
 ):
     try:
-        with open(output_file, "w") as f:
+        with open(output_file, "a") as f:
             f.write(f"{'=' * 80}\n")
             f.write(f"Amplitude Error\n")
             f.write(f"{'=' * 80}\n")
@@ -201,6 +201,8 @@ def calculate_amplitude_error(df_amplitude, bda_config, output_file):
             tolerance, passed, 
             output_file
         )
+
+        print("[Metrics] ✓ Amplitude Error completed successfully.")
 
     except Exception as e:
         print(f"Error comparing amplitudes: {e}")

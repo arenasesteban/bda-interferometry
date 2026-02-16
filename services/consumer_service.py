@@ -432,8 +432,8 @@ def main():
         help="Path to grid configuration JSON file"
     )
     parser.add_argument(
-        "--slurm_job_id",
-        default="default_job",
+        "--slurm-job-id",
+        required=True,
         help="Unique identifier for this job"
     )
 
@@ -445,7 +445,7 @@ def main():
             topic=args.topic,
             bda_config_path=args.bda_config,
             grid_config_path=args.grid_config,
-            slurm_job_id=args.job_id,
+            slurm_job_id=args.slurm_job_id,
         )
 
     except Exception as e:

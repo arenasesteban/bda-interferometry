@@ -52,7 +52,7 @@ def write_baseline_dependency_results(
     output_file
 ):
     try:
-        with open(output_file, "w") as f:
+        with open(output_file, "a") as f:
             f.write(f"\n{'=' * 80}\n")
             f.write(f"Baseline Dependency Validation\n")
             f.write(f"{'=' * 80}\n")
@@ -73,6 +73,7 @@ def write_baseline_dependency_results(
             f.write(f"VALIDATION:\n")
             f.write(f"  Ratio (Short/Long):  {ratio_compression:.2f}\n")
             f.write(f"  Status:              {'✓ PASSED' if validation_passed else '✗ FAILED'}\n")
+            f.write(f"{'=' * 80}\n")
 
     except Exception as e:
         print(f"Error writing baseline dependency results: {e}")
@@ -107,6 +108,8 @@ def validate_baseline_dependency(df_baseline_dependency, bda_config, output_file
             validation_passed,
             output_file
         )
+
+        print("[Metrics] ✓ Baseline Dependency validation completed successfully.")
     
     except Exception as e:
         print(f"Error validating baseline dependency: {e}")
