@@ -1,0 +1,6 @@
+tmp/
+logs/
+kafka/
+source/
+output/
+__pycache__/
