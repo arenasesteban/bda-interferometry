@@ -213,7 +213,7 @@ def process_streaming_batch(df_scientific, num_partitions, epoch_id, bda_config,
         blocks = df_scientific.select("message_id").distinct().collect()
 
         for block in blocks:
-            print(f"[Batch {epoch_id}] Processing Message {block['message_id']}")
+            print(f"[Batch {epoch_id}] Processing message - ID {block['message_id']}")
         
         # BDA processing
         df_averaged, df_windowed = apply_bda(df_scientific, num_partitions, bda_config)
@@ -277,24 +277,6 @@ def create_kafka_stream(spark, bootstrap_server, topic):
         kafka_df.value.alias("value"),
         kafka_df.headers.alias("headers")
     )
-
-
-def combine_and_image(grid, num_partitions, grid_config, slurm_job_id):
-    if not grid:
-        print("[Imaging] No data to process")
-        return False
-    
-    print("\n[Imaging] Combining gridded visibilities...")
-    df_gridded = reduce(DataFrame.unionByName, grid)
-    
-    print("[Imaging] Applying final gridding...")
-    df_gridded = apply_gridding(df_gridded, num_partitions, grid_config, strategy="COMPLETE")
-    
-    print("[Imaging] Generating dirty image...")
-    output_dirty_image, output_psf_image = generate_dirty_image(df_gridded, grid_config, slurm_job_id)
-    
-    print(f"[Imaging] ✓ Dirty image saved to: {output_dirty_image}")
-    print(f"[Imaging] ✓ PSF image saved to: {output_psf_image}")
 
 
 def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slurm_job_id):
@@ -372,21 +354,54 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
 
         # Generate final image
         if grid:
-            print("[Consumer] ✓ Generating final dirty image...")
-            combine_and_image(grid, num_partitions, grid_config, slurm_job_id)
+            df_grid = reduce(DataFrame.unionByName, grid)
+            df_grid.persist()
+            df_grid.count()
+            
+            print(f"[Imaging] Starting final dirty image generation")
+            print(f"[Imaging] Combining gridded visibilities")
+            df_gridded = apply_gridding(df_grid, num_partitions, grid_config, strategy="COMPLETE")
+            
+            print(f"[Imaging] Generating dirty image")
+            pdf_gridded = df_gridded.toPandas()
+            output_dirty_image, output_psf_image = generate_dirty_image(pdf_gridded, grid_config, slurm_job_id)
+
+            print(f"[Imaging] ✓ Dirty image saved to: {output_dirty_image}")
+            print(f"[Imaging] ✓ PSF image saved to: {output_psf_image}")
+
             final_time = time.time()
             total_time = final_time - initial_time
+
             print(f"[Consumer] Total time from start to image generation: {total_time:.1f} seconds")
+
+            df_grid.unpersist()
+
         else:
             print("[Consumer] No data processed, no image generated")
 
         if averaged and windowed:
-            print("[Consumer] ✓ Saving processed data samples...")
             df_averaged = reduce(DataFrame.unionByName, averaged)
             df_windowed = reduce(DataFrame.unionByName, windowed)
+            
+            df_averaged.persist()
+            df_windowed.persist()
 
-            df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv, df_scientific, df_averaging = calculate_metrics(df_windowed, df_averaged, num_partitions)
-            consolidate_metrics(df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv, bda_config, df_scientific, df_averaging, slurm_job_id)
+            averaged_count  = df_averaged.count()
+            windowed_count  = df_windowed.count()
+
+            print(f"[Evaluation] Starting metrics calculation")
+            print(f"[Evaluation] Total rows in original dataset: {windowed_count}")
+            print(f"[Evaluation] Total rows in averaged dataset: {averaged_count}")
+            
+            df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv = calculate_metrics(df_windowed, df_averaged, num_partitions)
+            
+            consolidate_metrics(df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv, bda_config, slurm_job_id)
+
+            print(f"[Evaluation] ✓ Metrics calculation completed")
+
+            df_averaged.unpersist()
+            df_windowed.unpersist()
+
         else:
             print("[Consumer] No processed data samples available for metrics")
 
