@@ -3,22 +3,15 @@ import matplotlib.pyplot as plt
 import cmcrameri
 
 
-def dataframe_to_grid(df_gridded, grid_config):
+def dataframe_to_grid(pdf_gridded, grid_config):
     img_size = grid_config["img_size"]
     padding_factor = grid_config["padding_factor"]
     
     u_size, v_size = int(img_size * padding_factor), int(img_size * padding_factor)
 
-    df_gridded.cache()
-    df_gridded.count()
-
-    pdf = df_gridded.toPandas()
-
-    df_gridded.unpersist()
-
-    u_coords, v_coords = pdf["u_pix"], pdf["v_pix"]
-    vs_real, vs_imag = pdf["vs_real"], pdf["vs_imag"]
-    weight = pdf["weight"]
+    u_coords, v_coords = pdf_gridded["u_pix"], pdf_gridded["v_pix"]
+    vs_real, vs_imag = pdf_gridded["vs_real"], pdf_gridded["vs_imag"]
+    weight = pdf_gridded["weight"]
 
     grids = np.zeros((v_size, u_size), dtype=np.complex128)
     weights = np.zeros((v_size, u_size), dtype=np.float64)
@@ -31,8 +24,8 @@ def dataframe_to_grid(df_gridded, grid_config):
     return grids, weights
 
 
-def generate_dirty_image(df_gridded, grid_config, slurm_job_id):
-    grids, weights = dataframe_to_grid(df_gridded, grid_config)
+def generate_dirty_image(pdf_gridded, grid_config, slurm_job_id):
+    grids, weights = dataframe_to_grid(pdf_gridded, grid_config)
 
     img_size = grid_config["img_size"]
     padding_factor = grid_config["padding_factor"]

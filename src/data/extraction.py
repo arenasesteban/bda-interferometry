@@ -3,7 +3,7 @@ import numpy as np
 import io
 import traceback
 import dask
-
+import time
 import msgpack
 
 from dask.distributed import Client, get_worker
@@ -15,10 +15,10 @@ ROWS_PER_BLOCK = 10_000
 def create_dask_client():
     try:
         dask.config.set({
-            "distributed.worker.memory.target":     0.45,
-            "distributed.worker.memory.spill":      0.55,
-            "distributed.worker.memory.pause":      0.75,
-            "distributed.worker.memory.terminate":  0.95,
+            "distributed.worker.memory.target":     0.60,
+            "distributed.worker.memory.spill":      0.80,
+            "distributed.worker.memory.pause":      0.95,
+            "distributed.worker.memory.terminate":  0.98,
             "array.slicing.split_large_chunks":     True,
         })
 
@@ -27,7 +27,7 @@ def create_dask_client():
         client = Client(
             n_workers           = 1,
             threads_per_worker  = 4,
-            memory_limit        = "160GB",
+            memory_limit        = "600GB",
             processes           = True,
             local_directory     = tmp,
         )
@@ -41,6 +41,40 @@ def create_dask_client():
         print(f"Error creating Dask client: {e}")
         traceback.print_exc()
         raise
+
+
+def rechunk_dataset(dataset):
+    row_chunks = dataset.data.data.chunks[0]
+
+    def rechunk_rows(x):
+        if x.chunks and x.chunks[0] == row_chunks:
+            return x
+
+        if len(x.shape) == 1:
+            return x.rechunk((row_chunks,))
+
+        if len(x.shape) == 2:
+            return x.rechunk((row_chunks, -1))
+        
+        if len(x.shape) == 3:
+            return x.rechunk((row_chunks, -1, -1))
+        
+        raise ValueError(f"Unsupported ndim={len(x.shape)} for array shape={x.shape}")
+
+    dataset_chunked = (
+        rechunk_rows(dataset.antenna1.data),
+        rechunk_rows(dataset.antenna2.data),
+        rechunk_rows(dataset.scan_number.data),
+        rechunk_rows(dataset.time.data),
+        rechunk_rows(dataset.dataset.EXPOSURE.data),
+        rechunk_rows(dataset.dataset.INTERVAL.data),
+        rechunk_rows(dataset.uvw.data),
+        rechunk_rows(dataset.data.data),
+        rechunk_rows(dataset.weight.data),
+        rechunk_rows(dataset.flag.data),
+    )
+
+    return dataset_chunked
 
 
 def create_kafka_producer():
@@ -87,23 +121,57 @@ def iter_rows(nrows: int, rows_per_msg: int):
         yield start, end
 
 
-def build_payload(block):
+def compute_chunk(chunk_delayed):
     try:
-        vs = np.asarray(block[7])
+        (
+            antenna1,
+            antenna2,
+            scan_number,
+            time,
+            exposure,
+            interval,
+            uvw,
+            visibility,
+            weight,
+            flag
+        ) = dask.compute(*chunk_delayed)
+
+        u, v, w = uvw[:, 0], uvw[:, 1], uvw[:, 2]
+
+        return (
+            antenna1, antenna2, scan_number,
+            time, exposure, interval,
+            u, v, w,
+            visibility, weight, flag
+        )
+
+    except Exception as e:
+        print(f"Error computing arrays: {e}")
+        traceback.print_exc()
+        raise
+
+
+def build_payload(data, start, end):
+    try:
+        vs = data[9][start:end]
+        visibilities = np.stack((vs.real, vs.imag), axis=-1)
+
+        fs = data[11][start:end]
+        flags = fs.astype(np.int8)
 
         data_arrays = {
-            "antenna1":         np.asarray(block[0]),
-            "antenna2":         np.asarray(block[1]),
-            "scan_number":      np.asarray(block[2]),
-            "time":             np.asarray(block[3]),
-            "exposure":         np.asarray(block[4]),
-            "interval":         np.asarray(block[5]),
-            "u":                np.asarray(block[6])[:, 0],
-            "v":                np.asarray(block[6])[:, 1],
-            "w":                np.asarray(block[6])[:, 2],
-            "visibilities":     np.stack([vs.real, vs.imag], axis=-1),
-            "weights":          np.asarray(block[8]),
-            "flags":            np.asarray(block[9]).astype(np.int8),
+            "antenna1":         data[0][start:end],
+            "antenna2":         data[1][start:end],
+            "scan_number":      data[2][start:end],
+            "time":             data[3][start:end],
+            "exposure":         data[4][start:end],
+            "interval":         data[5][start:end],
+            "u":                data[6][start:end],
+            "v":                data[7][start:end],
+            "w":                data[8][start:end],
+            "visibilities":     visibilities,
+            "weights":          data[10][start:end],
+            "flags":            flags,
         }
 
         with io.BytesIO() as buffer:
@@ -137,39 +205,31 @@ def build_metadata(message_id, data):
         ]
 
         return headers
-    
+
     except Exception as e:
         print(f"Error building metadata: {e}")
         traceback.print_exc()
         raise
 
 
-def send_visibilities(*blocks, chunk_id, data, nrows, topic):
+def send_visibilities(*chunk_delayed, chunk_id, data, topic):
     try:
         producer = create_kafka_producer()
 
-        for block_idx, (start, end) in enumerate(iter_rows(nrows, ROWS_PER_BLOCK)):
-            block = (
-                blocks[0][start:end],
-                blocks[1][start:end],
-                blocks[2][start:end],
-                blocks[3][start:end],
-                blocks[4][start:end],
-                blocks[5][start:end],
-                blocks[6][start:end],
-                blocks[7][start:end],
-                blocks[8][start:end],
-                blocks[9][start:end],
-            )
+        computed_chunk = compute_chunk(chunk_delayed)
+        nrows = computed_chunk[0].shape[0]
 
+        print(f"[Producer] Computed chunk {chunk_id} with {nrows} rows", flush=True)
+
+        for block_idx, (start, end) in enumerate(iter_rows(nrows, ROWS_PER_BLOCK)):
             message_id = f"{chunk_id}-{block_idx}"
-            payload = build_payload(block)
+            payload = build_payload(computed_chunk, start, end)
             headers = build_metadata(message_id, data)
             key     = f"message-{message_id}".encode("utf-8")
 
             producer.send(topic, key=key, value=payload, headers=headers).get(timeout=60)
-
-            print(f"[Producer] Block {block_idx} | Chunk {chunk_id} sent (rows {start} to {end})", flush=True)
+            
+            print(f"[Producer] Chunk {chunk_id} | Block {block_idx} sent (rows {start} to {end})", flush=True)
 
         return True
 
@@ -219,8 +279,6 @@ def stream_dataset(dataset, subms, topic):
 
     try:
         client = create_dask_client()
-        
-        nrows = dataset.nrows
 
         data = {
             "subms_id":         subms.id,
@@ -231,34 +289,19 @@ def stream_dataset(dataset, subms, topic):
             "n_correlations":   dataset.data.shape[2],
         }
 
-        print(f"[Extraction] Dataset chunks: {dataset.data.data.chunks[0]}")
-
-        arrays = (
-            dataset.antenna1.data,
-            dataset.antenna2.data,
-            dataset.scan_number.data,
-            dataset.time.data,
-            dataset.dataset.EXPOSURE.data,
-            dataset.dataset.INTERVAL.data,
-            dataset.uvw.data,
-            dataset.data.data,
-            dataset.weight.data,
-            dataset.flag.data
-        )
-
+        arrays = rechunk_dataset(dataset)
         blocks = [a.to_delayed().ravel() for a in arrays]
 
+        nrows = dataset.nrows
         nchunks = len(blocks[0])
 
-        tasks = []
+        print(f"[Extraction] Starting to stream dataset with {nrows} rows in {nchunks} chunks", flush=True)
+
         for chunk_id in range(nchunks):
             chunk_blocks = [block[chunk_id] for block in blocks]
             
-            task = dask.delayed(send_visibilities)(*chunk_blocks, chunk_id=chunk_id, data=data, nrows=nrows, topic=topic)
-            tasks.append(task)
-        
-        futures = client.compute(tasks)
-        client.gather(futures)
+            task = dask.delayed(send_visibilities)(*chunk_blocks, chunk_id=chunk_id, data=data, topic=topic)
+            client.compute(task).result()
             
         send_end_signal(topic, len(range(0, nrows, ROWS_PER_BLOCK)))
 
