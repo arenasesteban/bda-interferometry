@@ -3,7 +3,7 @@ import traceback
 import math
 
 
-def calculate_uv_distance(u1, v1, u2, v2):
+def calculate_uv_distance(u1, v1, u2, v2, lambda_ref):
     """
     Calculate Euclidean distance in the UV plane.
 
@@ -22,9 +22,9 @@ def calculate_uv_distance(u1, v1, u2, v2):
     try:
         # Calculate UV distance
         # Δuv = √[(u - u_ref)² + (v - v_ref)²]
-        d_uv = math.sqrt((u2 - u1) ** 2 + (v2 - v1) ** 2)
+        d_uv_meters = math.sqrt((u2 - u1) ** 2 + (v2 - v1) ** 2)
 
-        return d_uv
+        return d_uv_meters / lambda_ref  # Convert to wavelengths
 
     except Exception as e:
         print(f"Error calculating UV distance: {e}")

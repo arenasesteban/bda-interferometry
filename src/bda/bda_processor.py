@@ -1,14 +1,14 @@
 import numpy as np
 import traceback
+import pandas as pd
 
 from pyspark.sql.types import StructType, StructField, DoubleType, ArrayType, IntegerType, StringType
-from pyspark.sql.functions import pandas_udf, PandasUDFType
-import pandas as pd
+from pyspark.sql.functions import pandas_udf, PandasUDFType, col
 
 from .bda_core import calculate_phase_difference, calculate_uv_distance, sinc
 
 
-def assign_temporal_window(df, decorr_factor, fov):
+def assign_temporal_window(df, decorr_factor, fov, lambda_ref):
     """
     Assign temporal windows based on accumulated x value.
 
@@ -39,16 +39,16 @@ def assign_temporal_window(df, decorr_factor, fov):
             pdf = pdf.sort_values(by='time').reset_index(drop=True)
             n = len(pdf)
 
-            window_ids = np.zeros(n, dtype=np.float64)
+            window_ids = np.zeros(n, dtype=np.int32)
             d_uv_arr = np.zeros(n, dtype=np.float64)
             phi_dot_arr = np.zeros(n, dtype=np.float64)
             sinc_arr = np.zeros(n, dtype=np.float64)
 
             current_window = 1
+            window_ids[0] = current_window
 
             u_ref = pdf.loc[0, 'u']
             v_ref = pdf.loc[0, 'v']
-            window_ids[0] = current_window
 
             d_uv_arr[0] = np.nan
             phi_dot_arr[0] = np.nan
@@ -58,12 +58,12 @@ def assign_temporal_window(df, decorr_factor, fov):
                 u = pdf.loc[i, 'u']
                 v = pdf.loc[i, 'v']
 
-                d_uv = calculate_uv_distance(u, v, u_ref, v_ref)
-                delta_phi = calculate_phase_difference(d_uv, fov)
+                d_uv = calculate_uv_distance(u, v, u_ref, v_ref, lambda_ref)
+                x_inc = calculate_phase_difference(d_uv, fov)
                 
                 # Calculate decorrelation term
                 # sinc(ΔΦ/2)
-                sinc_val = sinc(delta_phi / 2.0)
+                sinc_val = sinc(x_inc / 2.0)
 
                 # Window assignment based on decorrelation factor
                 if sinc_val >= decorr_factor:
@@ -75,7 +75,7 @@ def assign_temporal_window(df, decorr_factor, fov):
                     u_ref, v_ref = u, v
 
                 d_uv_arr[i] = d_uv
-                phi_dot_arr[i] = delta_phi
+                phi_dot_arr[i] = x_inc
                 sinc_arr[i] = sinc_val
 
             pdf['window_id'] = window_ids
@@ -164,15 +164,6 @@ def average_by_window(df):
                 vs_list, ws_list, fs_list = [], [], []
 
                 for i in range(n):
-                    if pdf['baseline_key'].iloc[i] == '0-1':
-                        print("[Debug] Baseline:", pdf['baseline_key'].iloc[i])
-                        print("[Debug] Window ID:", pdf['window_id'].iloc[i])
-                        print("[Debug] UV Coords:", pdf['u'].iloc[i], pdf['v'].iloc[i])
-                        print("[Debug] Delta UV:", pdf['d_uv'].iloc[i])
-                        print("[Debug] Sinc Value:", pdf['sinc_value'].iloc[i])
-                        print("[Debug] Sinc Threshold:", pdf['sinc_value'].iloc[i] >= 0.95)
-                        print("-" * 60)
-
                     vs_data = pdf.iloc[i]['visibility']
                     ws_data = pdf.iloc[i]['weight']
                     fs_data = pdf.iloc[i]['flag']
@@ -246,9 +237,16 @@ def process_rows(df_scientific, bda_config):
     """
     try:
         decorr_factor = bda_config.get('decorr_factor', 0.95)
+        lambda_ref = bda_config.get('lambda_ref', 0.1)
         fov = bda_config.get('fov', 0.01)
 
-        df_windowed = assign_temporal_window(df_scientific, decorr_factor, fov)
+        df_windowed = assign_temporal_window(df_scientific, decorr_factor, fov, lambda_ref)
+        
+        df_windowed \
+            .filter(col("baseline_key") == "0-2") \
+            .select("baseline_key","window_id","u","v","time","d_uv","sinc_value") \
+            .show()
+
         df_averaged = average_by_window(df_windowed)
 
         return df_averaged, df_windowed

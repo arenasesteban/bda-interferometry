@@ -1,6 +1,6 @@
 import json
-from pathlib import Path
 import traceback
+from pathlib import Path
 
 
 def load_bda_config(config_path):
