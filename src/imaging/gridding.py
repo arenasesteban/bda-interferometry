@@ -2,6 +2,7 @@ import math
 import numpy as np
 import traceback
 import json
+import pandas as pd
 from pathlib import Path
 from astropy.constants import c
 
@@ -9,7 +10,6 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import (
     StructType, StructField, DoubleType, IntegerType
 )
-import pandas as pd
 
 from .weighting_schemes import apply_weighting
 
@@ -26,10 +26,7 @@ def apply_gridding(df_scientific, num_partitions, grid_config, strategy="PARTIAL
 
             return df_gridded
         elif strategy == "COMPLETE":
-            # Streaming finished, apply weighting and consolidation
-            df_repartitioned = df_scientific.repartition(num_partitions * 2, "u_pix", "v_pix")
-            
-            df_gridded = apply_weighting(df_repartitioned, grid_config)
+            df_gridded = apply_weighting(df_scientific, grid_config)
 
             df_gridded = df_gridded.coalesce(num_partitions)
             
@@ -229,22 +226,22 @@ def load_grid_config(config_path):
         raise
 
 
-def consolidate_gridding(gridded_rdd):
-    try:
-        grid_acc = gridded_rdd.groupBy("u_pix", "v_pix").agg(
-            F.sum("real").alias("real"),
-            F.sum("imag").alias("imag"),
-            F.sum("weight").alias("weight")
-        )
+def dataframe_to_grid(pdf_gridded, grid_config):
+    img_size = grid_config["img_size"]
+    padding_factor = grid_config["padding_factor"]
+    
+    u_size, v_size = int(img_size * padding_factor), int(img_size * padding_factor)
 
-        grid_avg = (grid_acc
-           .withColumn("real", F.when(F.col("weight") > 0, F.col("real")/F.col("weight")).otherwise(F.lit(0.0)))
-           .withColumn("imag", F.when(F.col("weight") > 0, F.col("imag")/F.col("weight")).otherwise(F.lit(0.0)))
-           .select("u_pix", "v_pix", "real", "imag", "weight"))
+    u_coords, v_coords = pdf_gridded["u_pix"], pdf_gridded["v_pix"]
+    vs_real, vs_imag = pdf_gridded["vs_real"], pdf_gridded["vs_imag"]
+    weight = pdf_gridded["weight"]
 
-        return grid_avg
+    grids = np.zeros((v_size, u_size), dtype=np.complex128)
+    weights = np.zeros((v_size, u_size), dtype=np.float64)
 
-    except Exception as e:
-        print(f"[Gridding] Error during consolidation: {e}")
-        traceback.print_exc()
-        raise
+    grids[v_coords, u_coords] = vs_real + 1j * vs_imag
+    weights[v_coords, u_coords] = weight
+
+    grids *= 0.5
+
+    return grids, weights

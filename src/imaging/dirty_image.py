@@ -3,59 +3,29 @@ import matplotlib.pyplot as plt
 import cmcrameri
 
 
-def dataframe_to_grid(pdf_gridded, grid_config):
-    img_size = grid_config["img_size"]
-    padding_factor = grid_config["padding_factor"]
-    
-    u_size, v_size = int(img_size * padding_factor), int(img_size * padding_factor)
-
-    u_coords, v_coords = pdf_gridded["u_pix"], pdf_gridded["v_pix"]
-    vs_real, vs_imag = pdf_gridded["vs_real"], pdf_gridded["vs_imag"]
-    weight = pdf_gridded["weight"]
-
-    grids = np.zeros((v_size, u_size), dtype=np.complex128)
-    weights = np.zeros((v_size, u_size), dtype=np.float64)
-
-    grids[v_coords, u_coords] = vs_real + 1j * vs_imag
-    weights[v_coords, u_coords] = weight
-
-    grids *= 0.5
-
-    return grids, weights
-
-
-def generate_dirty_image(pdf_gridded, grid_config, slurm_job_id):
-    grids, weights = dataframe_to_grid(pdf_gridded, grid_config)
-
+def fft(grids, weights, grid_config, type="dirty"):
     img_size = grid_config["img_size"]
     padding_factor = grid_config["padding_factor"]
     imsize = [img_size, img_size]
     grid_size = [int(imsize[0] * padding_factor), int(imsize[1] * padding_factor)]
 
-    fourier = np.fft.ifftshift(grids * weights)
-    dirty_image = np.fft.fft2(fourier, norm= 'forward')
-    dirty_image = np.fft.fftshift(dirty_image).real
+    if type == "dirty":
+        fourier = np.fft.ifftshift(grids * weights)
+        image = np.fft.fft2(fourier, norm= 'forward')
+        image = np.fft.fftshift(image).real
 
-    dirty_image = dirty_image * grid_size[0] * grid_size[1]
+    else:
+        fourier = np.fft.ifftshift(weights)
+        image = np.fft.fft2(fourier, norm= 'forward')
+        image = np.fft.fftshift(np.abs(image))
 
-    if padding_factor > 1.0:
+    if type == "dirty" and padding_factor > 1.0:
         start_x = (grid_size[0] - img_size) // 2
         start_y = (grid_size[1] - img_size) // 2
-        dirty_image = dirty_image[start_x:start_x + img_size, start_y:start_y + img_size]
+        image = image[start_x:start_x + img_size, start_y:start_y + img_size]
 
-    fourier_psf = np.fft.ifftshift(weights)
-    psf_image = np.fft.fft2(fourier_psf, norm= 'forward')
-    psf_image = np.fft.fftshift(np.abs(psf_image))
+    return image
 
-    psf_image = psf_image * grid_size[0] * grid_size[1]
-
-    output_dirty_image = f"./output/dirtyimage_{slurm_job_id}.png"
-    output_psf_image = f"./output/psf_{slurm_job_id}.png"
-
-    save_dirty_image(dirty_image, output_dirty_image)
-    save_psf_image(psf_image, output_psf_image)
-
-    return output_dirty_image, output_psf_image
 
 def save_dirty_image(dirty_image, output_file):
     plt.figure(figsize=(8, 8))
@@ -76,3 +46,16 @@ def save_psf_image(psf_image, output_file):
     plt.ylabel("Y [pixels]")
     plt.savefig(output_file)
     plt.close()
+
+
+def generate_dirty_image(grids, weights, grid_config, slurm_job_id):
+    dirty_image = fft(grids, weights, grid_config, type="dirty")
+    psf_image = fft(grids, weights, grid_config, type="psf")
+
+    output_dirty_image = f"./output/dirtyimage_{slurm_job_id}.png"
+    output_psf_image = f"./output/psf_{slurm_job_id}.png"
+
+    save_dirty_image(dirty_image, output_dirty_image)
+    save_psf_image(psf_image, output_psf_image)
+
+    return output_dirty_image, output_psf_image
