@@ -3,7 +3,6 @@ import numpy as np
 import io
 import traceback
 import dask
-import time
 import msgpack
 
 from dask.distributed import Client, get_worker
@@ -78,26 +77,19 @@ def rechunk_dataset(dataset):
 
 
 def create_kafka_producer():
-    worker = get_worker()
-
-    if not hasattr(worker, "_kafka_producer"):
-        worker._kafka_producer = KafkaProducer(
-            bootstrap_servers           = ["localhost:9092"],
-            acks                        = "all",
-            retries                     = 10,
-            linger_ms                   = 50,
-            batch_size                  = 1_048_576,    # 1 MB
-            max_request_size            = 10_485_760,   # 10 MB
-            request_timeout_ms          = 120_000,
-            delivery_timeout_ms         = 180_000,
-            compression_type            = "lz4",
-            max_block_ms                = 120_000,
-            api_version_auto_timeout_ms = 30_000,
-        )
-
-        print(f"[Producer] Kafka producer created on worker: {worker.name}")
-
-    return worker._kafka_producer
+    return KafkaProducer(
+        bootstrap_servers           = ["localhost:9092"],
+        acks                        = "all",
+        retries                     = 10,
+        linger_ms                   = 50,
+        batch_size                  = 1_048_576,    # 1 MB
+        max_request_size            = 10_485_760,   # 10 MB
+        request_timeout_ms          = 120_000,
+        delivery_timeout_ms         = 180_000,
+        compression_type            = "lz4",
+        max_block_ms                = 120_000,
+        api_version_auto_timeout_ms = 30_000,
+    )
 
 
 def close_kafka_producer():
@@ -153,10 +145,14 @@ def compute_chunk(chunk_delayed):
 
 def build_payload(data, start, end):
     try:
-        vs = data[9][start:end]
+        u = data[6][:, 0]
+        v = data[6][:, 1]
+        w = data[6][:, 2]
+
+        vs = data[7][start:end]
         visibilities = np.stack((vs.real, vs.imag), axis=-1)
 
-        fs = data[11][start:end]
+        fs = data[9][start:end]
         flags = fs.astype(np.int8)
 
         data_arrays = {
@@ -166,11 +162,11 @@ def build_payload(data, start, end):
             "time":             data[3][start:end],
             "exposure":         data[4][start:end],
             "interval":         data[5][start:end],
-            "u":                data[6][start:end],
-            "v":                data[7][start:end],
-            "w":                data[8][start:end],
+            "u":                u[start:end],
+            "v":                v[start:end],
+            "w":                w[start:end],
             "visibilities":     visibilities,
-            "weights":          data[10][start:end],
+            "weights":          data[8][start:end],
             "flags":            flags,
         }
 
@@ -212,24 +208,21 @@ def build_metadata(message_id, data):
         raise
 
 
-def send_visibilities(*chunk_delayed, chunk_id, data, topic):
+def send_visibilities(*chunk, chunk_id, data, producer, topic):
     try:
-        producer = create_kafka_producer()
-
-        computed_chunk = compute_chunk(chunk_delayed)
-        nrows = computed_chunk[0].shape[0]
-
-        print(f"[Producer] Computed chunk {chunk_id} with {nrows} rows", flush=True)
+        nrows = chunk[0].shape[0]
 
         for block_idx, (start, end) in enumerate(iter_rows(nrows, ROWS_PER_BLOCK)):
             message_id = f"{chunk_id}-{block_idx}"
-            payload = build_payload(computed_chunk, start, end)
+            payload = build_payload(chunk, start, end)
             headers = build_metadata(message_id, data)
             key     = f"message-{message_id}".encode("utf-8")
 
             producer.send(topic, key=key, value=payload, headers=headers).get(timeout=60)
             
             print(f"[Producer] Chunk {chunk_id} | Block {block_idx} sent (rows {start} to {end})", flush=True)
+        
+        print(f"-" * 60, flush=True)
 
         return True
 
@@ -239,16 +232,8 @@ def send_visibilities(*chunk_delayed, chunk_id, data, topic):
         raise
 
 
-def send_end_signal(topic, n_blocks):
-    try:
-        producer = KafkaProducer(
-            bootstrap_servers           = ["localhost:9092"],
-            acks                        = "all",
-            retries                     = 10,
-            request_timeout_ms          = 120_000,
-            api_version_auto_timeout_ms = 30_000,
-        )
-        
+def send_end_signal(producer, topic, n_blocks):
+    try:        
         metadata = {
             "schema":       "visibilities_blocks",
             "total_blocks": n_blocks,
@@ -268,17 +253,12 @@ def send_end_signal(topic, n_blocks):
         traceback.print_exc()
         raise
 
-    finally:
-        if producer:
-            producer.flush()
-            producer.close()
-
 
 def stream_dataset(dataset, subms, topic):
-    client = None
+    producer = None
 
     try:
-        client = create_dask_client()
+        producer = create_kafka_producer()
 
         data = {
             "subms_id":         subms.id,
@@ -289,21 +269,19 @@ def stream_dataset(dataset, subms, topic):
             "n_correlations":   dataset.data.shape[2],
         }
 
-        arrays = rechunk_dataset(dataset)
-        blocks = [a.to_delayed().ravel() for a in arrays]
+        arrays = dask.compute(*rechunk_dataset(dataset))
 
         nrows = dataset.nrows
-        nchunks = len(blocks[0])
+        chunks = dataset.data.data.chunks[0]
+        nchunks = len(chunks)
 
-        print(f"[Extraction] Starting to stream dataset with {nrows} rows in {nchunks} chunks", flush=True)
+        print(f"[Extraction] Starting to stream dataset with {nrows} rows in {nchunks} chunks\n", flush=True)
 
-        for chunk_id in range(nchunks):
-            chunk_blocks = [block[chunk_id] for block in blocks]
+        for chunk_id, (start, end) in enumerate(iter_rows(nrows, chunks[0])):
+            chunk_data = tuple(a[start:end] for a in arrays)
+            send_visibilities(*chunk_data, chunk_id=chunk_id, data=data, producer=producer, topic=topic)
             
-            task = dask.delayed(send_visibilities)(*chunk_blocks, chunk_id=chunk_id, data=data, topic=topic)
-            client.compute(task).result()
-            
-        send_end_signal(topic, len(range(0, nrows, ROWS_PER_BLOCK)))
+        send_end_signal(producer, topic, len(range(0, nrows, ROWS_PER_BLOCK)))
 
     except Exception as e:
         print(f"Error streaming dataset: {e}")
@@ -311,5 +289,6 @@ def stream_dataset(dataset, subms, topic):
         raise
 
     finally:
-        if client:
-            client.close()
+        if producer:
+            producer.flush()
+            producer.close()
