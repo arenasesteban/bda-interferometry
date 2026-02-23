@@ -7,22 +7,21 @@ This service consumes visibility data chunks from a Kafka topic, processes them 
 import io
 import sys
 import argparse
-from pathlib import Path
 import time
 import traceback
 import msgpack
 import numpy as np
 import uuid
-from functools import reduce
 import logging
+from pathlib import Path
+from functools import reduce
 
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql.functions import col, decode, trim
 from pyspark.sql.types import (
     StringType, StructType, StructField, IntegerType,
     DoubleType, ArrayType
 )
-from pyspark.sql.functions import col, decode, trim
-from pyspark.sql import DataFrame
 
 # Add src directory to path
 project_root = Path(__file__).parent.parent
@@ -31,9 +30,47 @@ sys.path.append(str(src_path))
 
 from bda.bda_config import load_bda_config
 from bda.bda_integration import apply_bda
-from imaging.gridding import apply_gridding, load_grid_config
+from imaging.gridding import apply_gridding, load_grid_config, dataframe_to_grid
 from imaging.dirty_image import generate_dirty_image
 from evaluation.metrics import calculate_metrics, consolidate_metrics
+
+
+def create_spark_session():
+    project_root = Path(__file__).parent.parent
+    src_path = str(project_root / "src")
+
+    spark = SparkSession.builder \
+        .appName("BDA-Interferometry-Consumer") \
+        .config("spark.executorEnv.PYTHONPATH", src_path) \
+        .getOrCreate()
+    
+    spark.sparkContext.setLogLevel("WARN")
+
+    logging.getLogger("org.apache.spark.sql.kafka010").setLevel(logging.ERROR)
+
+    print(f"[Spark] Master: {spark.sparkContext.master}")
+    print(f"[Spark] App ID: {spark.sparkContext.applicationId}")
+
+    return spark
+
+
+def create_kafka_stream(spark, bootstrap_server, topic):
+    kafka_df = spark \
+        .readStream \
+        .format("kafka") \
+        .option("kafka.bootstrap.servers", bootstrap_server) \
+        .option("subscribe", topic) \
+        .option("startingOffsets", "earliest") \
+        .option("failOnDataLoss", "false") \
+        .option("maxOffsetsPerTrigger", "300") \
+        .option("includeHeaders", "true") \
+        .load()
+    
+    return kafka_df.select(
+        kafka_df.key.alias("key"),
+        kafka_df.value.alias("value"),
+        kafka_df.headers.alias("headers")
+    )
 
 
 def define_visibility_schema():
@@ -202,29 +239,25 @@ def process_message(iterator):
 
 
 def process_streaming_batch(df_scientific, num_partitions, epoch_id, bda_config, grid_config):
-    start_time = time.time()
-    
     try:       
-        row_count = df_scientific.count()
-        
-        if row_count == 0:
-            return None
-        
         blocks = df_scientific.select("message_id").distinct().collect()
 
         for block in blocks:
             print(f"[Batch {epoch_id}] Processing message - ID {block['message_id']}")
         
-        # BDA processing
-        df_averaged, df_windowed = apply_bda(df_scientific, num_partitions, bda_config)
-        bda_time = (time.time() - start_time)
-        print(f"[Batch {epoch_id}] BDA completed in {bda_time:.1f} seconds")
+        df_averaged, df_windowed = None, None
+
+        if bda_config["decorr_factor"] < 1.0:
+            # BDA processing
+            df_averaged, df_windowed = apply_bda(df_scientific, num_partitions, bda_config)
+            print(f"[Batch {epoch_id}] ✓ BDA applied")
 
         # Gridding
-        df_grid = apply_gridding(df_averaged, num_partitions, grid_config, strategy="PARTIAL")
-        total_time = (time.time() - start_time)
-        print(f"[Batch {epoch_id}] Gridding completed in {total_time:.1f} seconds")
-        print(f"[Batch {epoch_id}] Total processing: {total_time:.1f} seconds")
+        df_grid = apply_gridding(
+            df_averaged if bda_config["decorr_factor"] < 1.0 else df_scientific, 
+            num_partitions, grid_config, strategy="PARTIAL"
+        )
+        print(f"[Batch {epoch_id}] ✓ Gridding applied")
 
         return df_grid, df_averaged, df_windowed
 
@@ -234,49 +267,57 @@ def process_streaming_batch(df_scientific, num_partitions, epoch_id, bda_config,
         return None
 
 
-def create_spark_session():
-    """
-    Create and configure a Spark session for interferometry data processing.
+def consolidate_processing(grid, num_partitions, grid_config, slurm_job_id):
+    if grid:
+        df_grid = reduce(DataFrame.unionByName, grid)
 
-    Returns
-    -------
-        SparkSession: Configured Spark session.
-    """
-    project_root = Path(__file__).parent.parent
-    src_path = str(project_root / "src")
+        df_grid = df_grid.repartition(num_partitions * 2, "u_pix", "v_pix").persist()
+        
+        print(f"[Imaging] Starting final dirty image generation")
+        print(f"[Imaging] Combining gridded visibilities")
 
-    spark = SparkSession.builder \
-        .appName("BDA-Interferometry-Consumer") \
-        .config("spark.executorEnv.PYTHONPATH", src_path) \
-        .getOrCreate()
+        df_gridded = apply_gridding(df_grid, num_partitions, grid_config, strategy="COMPLETE")
     
-    spark.sparkContext.setLogLevel("WARN")
+        print(f"[Imaging] Building array from gridded data")
 
-    logging.getLogger("org.apache.spark.sql.kafka010").setLevel(logging.ERROR)
+        pdf_gridded = df_gridded.toPandas()
+        grids, weights = dataframe_to_grid(pdf_gridded, grid_config)
+        
+        print(f"[Imaging] Generating dirty image")
+        
+        output_dirty_image, output_psf_image = generate_dirty_image(grids, weights, grid_config, slurm_job_id)
 
-    print(f"[Spark] Master: {spark.sparkContext.master}")
-    print(f"[Spark] App ID: {spark.sparkContext.applicationId}")
+        print(f"[Imaging] ✓ Dirty image saved to: {output_dirty_image}")
+        print(f"[Imaging] ✓ PSF image saved to: {output_psf_image}")
 
-    return spark
+        df_grid.unpersist()
+
+    else:
+        print("[Consumer] No data processed, no image generated")
 
 
-def create_kafka_stream(spark, bootstrap_server, topic):
-    kafka_df = spark \
-        .readStream \
-        .format("kafka") \
-        .option("kafka.bootstrap.servers", bootstrap_server) \
-        .option("subscribe", topic) \
-        .option("startingOffsets", "earliest") \
-        .option("failOnDataLoss", "false") \
-        .option("maxOffsetsPerTrigger", "300") \
-        .option("includeHeaders", "true") \
-        .load()
-    
-    return kafka_df.select(
-        kafka_df.key.alias("key"),
-        kafka_df.value.alias("value"),
-        kafka_df.headers.alias("headers")
-    )
+def generate_metrics(averaged, windowed, num_partitions, bda_config, slurm_job_id):
+    if averaged and windowed:
+        df_averaged = reduce(DataFrame.unionByName, averaged)
+        df_windowed = reduce(DataFrame.unionByName, windowed)
+
+        df_averaged = df_averaged.repartition(num_partitions * 2, "baseline_key")
+        df_windowed = df_windowed.repartition(num_partitions * 2, "baseline_key")
+
+        print(f"[Evaluation] Starting metrics calculation")
+
+        df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv, df_scientific, df_averaging = calculate_metrics(df_windowed, df_averaged)
+        
+        consolidate_metrics(
+            df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv, 
+            df_scientific, df_averaging,
+            bda_config, slurm_job_id
+        )
+
+        print(f"[Evaluation] ✓ Metrics calculation completed")
+
+    else:
+        print("[Consumer] No processed data samples available for metrics")
 
 
 def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slurm_job_id):
@@ -303,7 +344,7 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
         grid, averaged, windowed = [], [], []
         stream_state = {'signal_received': False}
 
-        initial_time = time.time()
+        processing_time = {}
 
         def process_batch(df_scientific, epoch_id):    
             df_filtered, stream_ended = check_end_signal(df_scientific, epoch_id)
@@ -312,6 +353,11 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
                 print(f"[Batch {epoch_id}] Empty after filtering, skipping")
                 return
             
+            if not processing_time:
+                processing_time["start"] = time.time()
+
+            processing_time[epoch_id] = { "start": time.time() }
+
             deserialized_rdd = df_filtered.rdd.mapPartitions(process_message)
             deserialized_df = spark.createDataFrame(deserialized_rdd, visibility_schema)
 
@@ -321,7 +367,11 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
                 grid.append(df_grid)
                 averaged.append(df_averaged)
                 windowed.append(df_windowed)
-                print(f"[Batch {epoch_id}] ✓ Completed successfully")
+
+                processing_time[epoch_id]["end"] = time.time()
+
+                print(f"[Batch {epoch_id}] ✓ Completed successfully in {processing_time[epoch_id]['end'] - processing_time[epoch_id]['start']:.1f} seconds")
+            
             else:
                 print(f"[Batch {epoch_id}] ✗ No output generated")
 
@@ -353,57 +403,16 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
         print("[Consumer] Stopping query...")
 
         # Generate final image
-        if grid:
-            df_grid = reduce(DataFrame.unionByName, grid)
-            df_grid.persist()
-            df_grid.count()
-            
-            print(f"[Imaging] Starting final dirty image generation")
-            print(f"[Imaging] Combining gridded visibilities")
-            df_gridded = apply_gridding(df_grid, num_partitions, grid_config, strategy="COMPLETE")
-            
-            print(f"[Imaging] Generating dirty image")
-            pdf_gridded = df_gridded.toPandas()
-            output_dirty_image, output_psf_image = generate_dirty_image(pdf_gridded, grid_config, slurm_job_id)
+        consolidate_processing(grid, num_partitions, grid_config, slurm_job_id)
 
-            print(f"[Imaging] ✓ Dirty image saved to: {output_dirty_image}")
-            print(f"[Imaging] ✓ PSF image saved to: {output_psf_image}")
+        processing_time["end"] = time.time()
+        total_time = processing_time["end"] - processing_time["start"]
 
-            final_time = time.time()
-            total_time = final_time - initial_time
+        print(f"[Consumer] Total time from start to image generation: {total_time:.1f} seconds")
 
-            print(f"[Consumer] Total time from start to image generation: {total_time:.1f} seconds")
-
-            df_grid.unpersist()
-
-        else:
-            print("[Consumer] No data processed, no image generated")
-
-        if averaged and windowed:
-            df_averaged = reduce(DataFrame.unionByName, averaged)
-            df_windowed = reduce(DataFrame.unionByName, windowed)
-            
-            df_averaged.persist()
-            df_windowed.persist()
-
-            averaged_count  = df_averaged.count()
-            windowed_count  = df_windowed.count()
-
-            print(f"[Evaluation] Starting metrics calculation")
-            print(f"[Evaluation] Total rows in original dataset: {windowed_count}")
-            print(f"[Evaluation] Total rows in averaged dataset: {averaged_count}")
-            
-            df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv = calculate_metrics(df_windowed, df_averaged, num_partitions)
-            
-            consolidate_metrics(df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv, bda_config, slurm_job_id)
-
-            print(f"[Evaluation] ✓ Metrics calculation completed")
-
-            df_averaged.unpersist()
-            df_windowed.unpersist()
-
-        else:
-            print("[Consumer] No processed data samples available for metrics")
+        # Generate metrics
+        if bda_config["decorr_factor"] < 1.0:
+            generate_metrics(averaged, windowed, num_partitions, bda_config, slurm_job_id)
 
         print("[Consumer] Consumer finished processing")
 
