@@ -35,11 +35,12 @@ def load_simulation_config(config_path):
     return {}
 
 
-def update_bda_config(config_path, lambda_ref, min_diameter):
+def update_bda_config(config_path, lambda_ref, min_diameter, threshold):
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
     
+        config["threshold_baseline"] = float(threshold)
         config["lambda_ref"] = lambda_ref
 
         if config["fov_strategy"] == "DERIVED":
@@ -114,13 +115,14 @@ def run_producer(antenna_config_path, simulation_config_path, topic):
         sim_config = load_simulation_config(simulation_config_path)
         print("✓ Loaded simulation configuration.", flush=True)
 
-        dataset = generate_dataset(antenna_config_path, sim_config)
+        dataset, interferometer = generate_dataset(antenna_config_path, sim_config)
         print("✓ Dataset generation complete.", flush=True)
 
         update_bda_config(
             config_path="./configs/bda_config.json",
             lambda_ref=dataset.spws.lambda_ref,
             min_diameter=dataset.antenna.min_diameter,
+            threshold=interferometer.antenna_array.get_median_antenna_separation().compute()
         )
         print("✓ BDA configuration updated.", flush=True)
 
