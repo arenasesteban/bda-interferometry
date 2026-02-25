@@ -1,4 +1,5 @@
 {
+    "interferometer": "ALMA",
     "freq_min": 35,
     "freq_max": 50,
     "n_chans": 50,

@@ -242,11 +242,6 @@ def process_rows(df_scientific, bda_config):
 
         df_windowed = assign_temporal_window(df_scientific, decorr_factor, fov, lambda_ref)
         
-        df_windowed \
-            .filter(col("baseline_key") == "0-2") \
-            .select("baseline_key","window_id","u","v","time","d_uv","sinc_value") \
-            .show()
-
         df_averaged = average_by_window(df_windowed)
 
         return df_averaged, df_windowed

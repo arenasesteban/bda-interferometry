@@ -165,7 +165,6 @@ def process_visibility(row, chan_freq, corrs_map, uvcellsize, padded_size):
 
 def calculate_uv_pix(u, v, freq, uvcellsize, padded_size):
     try:
-        """ u_lambda, v_lambda = u / (c.value / freq), v / (c.value / freq) """
         u_lambda, v_lambda = u * freq / c.value, v * freq / c.value
 
         u_pix = math.floor((u_lambda / uvcellsize[0]) + (padded_size // 2) + 0.5)
@@ -202,6 +201,7 @@ def build_corrs_map(corrs_string):
         traceback.print_exc()
         raise
 
+
 def load_grid_config(config_path):
     config_file = Path(config_path)
 
@@ -226,22 +226,18 @@ def load_grid_config(config_path):
         raise
 
 
-def dataframe_to_grid(pdf_gridded, grid_config):
+def build_grid(df_gridded, grid_config):
     img_size = grid_config["img_size"]
     padding_factor = grid_config["padding_factor"]
-    
-    u_size, v_size = int(img_size * padding_factor), int(img_size * padding_factor)
+    u_size = int(img_size * padding_factor)
+    v_size = int(img_size * padding_factor)
 
-    u_coords, v_coords = pdf_gridded["u_pix"], pdf_gridded["v_pix"]
-    vs_real, vs_imag = pdf_gridded["vs_real"], pdf_gridded["vs_imag"]
-    weight = pdf_gridded["weight"]
+    pdf = df_gridded.select("u_pix", "v_pix", "vs_real", "vs_imag", "weight").toPandas()
 
     grids = np.zeros((v_size, u_size), dtype=np.complex128)
     weights = np.zeros((v_size, u_size), dtype=np.float64)
 
-    grids[v_coords, u_coords] = vs_real + 1j * vs_imag
-    weights[v_coords, u_coords] = weight
-
-    grids *= 0.5
+    grids[pdf["v_pix"].values, pdf["u_pix"].values] = (pdf["vs_real"].values + 1j * pdf["vs_imag"].values) * 0.5
+    weights[pdf["v_pix"].values, pdf["u_pix"].values] = pdf["weight"].values
 
     return grids, weights
