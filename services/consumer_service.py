@@ -30,9 +30,9 @@ sys.path.append(str(src_path))
 
 from bda.bda_config import load_bda_config
 from bda.bda_integration import apply_bda
-from imaging.gridding import apply_gridding, load_grid_config, dataframe_to_grid
+from imaging.gridding import apply_gridding, load_grid_config, build_grid
 from imaging.dirty_image import generate_dirty_image
-from evaluation.metrics import calculate_metrics, consolidate_metrics
+from evaluation.metrics import calculate_metrics
 
 
 def create_spark_session():
@@ -271,7 +271,7 @@ def consolidate_processing(grid, num_partitions, grid_config, slurm_job_id):
     if grid:
         df_grid = reduce(DataFrame.unionByName, grid)
 
-        df_grid = df_grid.repartition(num_partitions * 2, "u_pix", "v_pix").persist()
+        df_grid = df_grid.repartition(num_partitions * 2, "u_pix", "v_pix")
         
         print(f"[Imaging] Starting final dirty image generation")
         print(f"[Imaging] Combining gridded visibilities")
@@ -280,8 +280,10 @@ def consolidate_processing(grid, num_partitions, grid_config, slurm_job_id):
     
         print(f"[Imaging] Building array from gridded data")
 
-        pdf_gridded = df_gridded.toPandas()
-        grids, weights = dataframe_to_grid(pdf_gridded, grid_config)
+        time_start = time.time()
+        grids, weights = build_grid(df_gridded, grid_config)
+        time_end = time.time()
+        print(f"[Imaging] ✓ Grid built in {time_end - time_start:.1f} seconds")
         
         print(f"[Imaging] Generating dirty image")
         
@@ -306,13 +308,7 @@ def generate_metrics(averaged, windowed, num_partitions, bda_config, slurm_job_i
 
         print(f"[Evaluation] Starting metrics calculation")
 
-        df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv, df_scientific, df_averaging = calculate_metrics(df_windowed, df_averaged)
-        
-        consolidate_metrics(
-            df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv, 
-            df_scientific, df_averaging,
-            bda_config, slurm_job_id
-        )
+        calculate_metrics(df_windowed, df_averaged, bda_config, slurm_job_id)
 
         print(f"[Evaluation] ✓ Metrics calculation completed")
 
@@ -403,12 +399,16 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
         print("[Consumer] Stopping query...")
 
         # Generate final image
+        processing_time["image_generation"] = { "start": time.time() }
         consolidate_processing(grid, num_partitions, grid_config, slurm_job_id)
+        processing_time["image_generation"]["end"] = time.time()
 
         processing_time["end"] = time.time()
         total_time = processing_time["end"] - processing_time["start"]
+        image_time = processing_time["image_generation"]["end"] - processing_time["image_generation"]["start"]
 
-        print(f"[Consumer] Total time from start to image generation: {total_time:.1f} seconds")
+        print(f"[Consumer] Total time from start to image generation: {total_time/60:.1f} minutes")
+        print(f"[Consumer] Time spent on image generation: {image_time/60:.1f} minutes")
 
         # Generate metrics
         if bda_config["decorr_factor"] < 1.0:
