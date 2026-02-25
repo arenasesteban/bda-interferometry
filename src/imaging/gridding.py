@@ -226,18 +226,56 @@ def load_grid_config(config_path):
         raise
 
 
-def build_grid(df_gridded, grid_config):
+# def build_grid(df_gridded, grid_config):
+#     img_size = grid_config["img_size"]
+#     padding_factor = grid_config["padding_factor"]
+#     u_size = int(img_size * padding_factor)
+#     v_size = int(img_size * padding_factor)
+
+#     pdf = df_gridded.select("u_pix", "v_pix", "vs_real", "vs_imag", "weight").toPandas()
+
+#     grids = np.zeros((v_size, u_size), dtype=np.complex128)
+#     weights = np.zeros((v_size, u_size), dtype=np.float64)
+
+#     grids[pdf["v_pix"].values, pdf["u_pix"].values] = (pdf["vs_real"].values + 1j * pdf["vs_imag"].values) * 0.5
+#     weights[pdf["v_pix"].values, pdf["u_pix"].values] = pdf["weight"].values
+
+#     return grids, weights
+
+
+def build_grid(df_gridded, grid_config, num_partitions):
     img_size = grid_config["img_size"]
     padding_factor = grid_config["padding_factor"]
     u_size = int(img_size * padding_factor)
     v_size = int(img_size * padding_factor)
 
-    pdf = df_gridded.select("u_pix", "v_pix", "vs_real", "vs_imag", "weight").toPandas()
+    df = (df_gridded
+          .select("u_pix", "v_pix", "vs_real", "vs_imag", "weight")
+          .repartition(num_partitions // 2, "v_pix"))
 
-    grids = np.zeros((v_size, u_size), dtype=np.complex128)
-    weights = np.zeros((v_size, u_size), dtype=np.float64)
+    def grid_rows(iterator):
+        grid = np.zeros((v_size, u_size), dtype=np.complex128)
+        weights = np.zeros((v_size, u_size), dtype=np.float64)
 
-    grids[pdf["v_pix"].values, pdf["u_pix"].values] = (pdf["vs_real"].values + 1j * pdf["vs_imag"].values) * 0.5
-    weights[pdf["v_pix"].values, pdf["u_pix"].values] = pdf["weight"].values
+        for r in iterator:
+            u = r["u_pix"]
+            v = r["v_pix"]
+            grid[v, u] = (r["vs_real"] + 1j * r["vs_imag"]) * 0.5
+            weights[v, u] = r["weight"]
 
-    return grids, weights
+        yield (grid, weights)
+
+    partials = df.rdd.mapPartitions(grid_rows)
+
+    def merge_grid(partial_left, partial_right):
+        left_grid, left_weights = partial_left
+        right_grid, right_weights = partial_right
+
+        left_grid += right_grid
+        left_weights += right_weights
+
+        return (left_grid, left_weights)
+
+    grid, weights = partials.treeReduce(merge_grid, depth=2)
+
+    return grid, weights
