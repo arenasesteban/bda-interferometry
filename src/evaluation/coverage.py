@@ -7,22 +7,20 @@ from pyspark.sql import functions as F
 def coverage_uv(df_scientific, df_averaging):
     try:
         df_uv_scientific = df_scientific.select(
-            F.col('u').alias('u_scientific'),
-            F.col('v').alias('v_scientific'),
-            F.lit(None).cast('double').alias('u_averaged'),
-            F.lit(None).cast('double').alias('v_averaged')
-        )
+            (F.col('u') / 1000).alias('u_scientific'),
+            (F.col('v') / 1000).alias('v_scientific')
+        ).filter(
+            F.col('u_scientific').isNotNull() & F.col('v_scientific').isNotNull()
+        ).collect()
 
         df_uv_averaging = df_averaging.select(
-            F.lit(None).cast('double').alias('u_scientific'),
-            F.lit(None).cast('double').alias('v_scientific'),
-            F.col('u').alias('u_averaged'),
-            F.col('v').alias('v_averaged')
-        )
+            (F.col('u') / 1000).alias('u_averaged'),
+            (F.col('v') / 1000).alias('v_averaged')
+        ).filter(
+            F.col('u_averaged').isNotNull() & F.col('v_averaged').isNotNull()
+        ).collect()
 
-        df_coverage_uv = df_uv_scientific.unionByName(df_uv_averaging)
-
-        return df_coverage_uv
+        return df_uv_scientific, df_uv_averaging
 
     except Exception as e:
         print(f"Error calculating coverage UV: {e}")
@@ -30,27 +28,15 @@ def coverage_uv(df_scientific, df_averaging):
         raise
 
 
-def calculate_coverage_uv(df_coverage_uv, output_coverage):
+def calculate_coverage_uv(df_scientific, df_averaging, output_coverage):
     try:
-        uv_scientific = df_coverage_uv.select(
-            (F.col('u_scientific') / 1000).alias('u_scientific'),
-            (F.col('v_scientific') / 1000).alias('v_scientific')
-        ).filter(
-            F.col('u_scientific').isNotNull() & F.col('v_scientific').isNotNull()
-        ).collect()
-        
-        uv_averaging = df_coverage_uv.select(
-            (F.col('u_averaged') / 1000).alias('u_averaged'),
-            (F.col('v_averaged') / 1000).alias('v_averaged')
-        ).filter(
-            F.col('u_averaged').isNotNull() & F.col('v_averaged').isNotNull()
-        ).collect()
+        df_uv_scientific, df_uv_averaging = coverage_uv(df_scientific, df_averaging)
 
-        u_scientific = np.array([row['u_scientific'] for row in uv_scientific if row['u_scientific'] is not None])
-        v_scientific = np.array([row['v_scientific'] for row in uv_scientific if row['v_scientific'] is not None])
+        u_scientific = np.array([row['u_scientific'] for row in df_uv_scientific if row['u_scientific'] is not None])
+        v_scientific = np.array([row['v_scientific'] for row in df_uv_scientific if row['v_scientific'] is not None])
 
-        u_averaging = np.array([row['u_averaged'] for row in uv_averaging if row['u_averaged'] is not None])
-        v_averaging = np.array([row['v_averaged'] for row in uv_averaging if row['v_averaged'] is not None])
+        u_averaging = np.array([row['u_averaged'] for row in df_uv_averaging if row['u_averaged'] is not None])
+        v_averaging = np.array([row['v_averaged'] for row in df_uv_averaging if row['v_averaged'] is not None])
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
         

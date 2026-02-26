@@ -1,53 +1,58 @@
 import traceback
 
-from evaluation.coverage import coverage_uv
-
 from .amplitude import amplitude, calculate_amplitude_error
 from .rms import rms, calculate_rms_measure
-from .baseline import baseline_dependency, validate_baseline_dependency
-from .coverage import coverage_uv, calculate_coverage_uv
+from .baseline import validate_baseline_dependency
+from .coverage import calculate_coverage_uv
 
 
-def calculate_metrics(df_scientific, df_averaging, num_partitions):
+def calculate_metrics(df_scientific, df_averaging, bda_config, slurm_job_id):
     try:
-        df_scientific = df_scientific.repartition(num_partitions * 2, 'baseline_key')
-        df_averaging = df_averaging.repartition(num_partitions * 2, 'baseline_key')
+        df_scientific, df_averaging = prepare_dataframes(df_scientific, df_averaging)
 
+        df_amplitude = amplitude(df_scientific, df_averaging)
+        df_rms = rms(df_scientific, df_averaging)
+
+        output_metrics = f"./output/metrics_{slurm_job_id}.txt"
+        output_coverage = f"./output/coverage_uv_{slurm_job_id}.png"
+
+        print(f"[Evaluation] Calculating amplitude error")
+        calculate_amplitude_error(df_amplitude, bda_config, output_metrics)
+
+        print(f"[Evaluation] Calculating RMS measure")
+        calculate_rms_measure(df_rms, bda_config, output_metrics)
+
+        print(f"[Evaluation] Validating baseline dependency")
+        validate_baseline_dependency(df_scientific, df_averaging, bda_config, output_metrics)
+
+        print(f"[Evaluation] Calculating UV coverage")
+        calculate_coverage_uv(df_scientific, df_averaging, output_coverage)
+
+    except Exception as e:
+        print(f"[Evaluation] Error calculating metrics: {e}")
+        traceback.print_exc()
+        raise
+
+    finally:
+        df_scientific.unpersist()
+        df_averaging.unpersist()
+
+
+def prepare_dataframes(df_scientific, df_averaging):
+    try:
         cols = ["baseline_key", "window_id", "u", "v", "visibility", "flag"]
         df_scientific = df_scientific.select(cols)
         df_averaging = df_averaging.select(cols)
 
-        df_coverage_uv = coverage_uv(df_scientific, df_averaging)
-        df_baseline_dependency = baseline_dependency(df_averaging)
-        df_amplitude = amplitude(df_scientific, df_averaging)
-        df_rms = rms(df_scientific, df_averaging)
+        df_scientific.persist()
+        df_averaging.persist()
 
-        return df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv
+        df_scientific.count()
+        df_averaging.count()
 
-    except Exception as e:
-        print(f"[Metrics] Error calculating metrics: {e}")
-        traceback.print_exc()
-        raise
-
-
-def consolidate_metrics(df_amplitude, df_rms, df_baseline_dependency, df_coverage_uv, bda_config, slurm_job_id):
-    try:
-        output_metrics = f"./output/metrics_{slurm_job_id}.txt"
-        output_coverage = f"./output/coverage_uv_{slurm_job_id}.png"
-
-        print(f"[Metrics] Calculating amplitude error")
-        calculate_amplitude_error(df_amplitude, bda_config, output_metrics)
-
-        print(f"[Metrics] Calculating RMS measure")
-        calculate_rms_measure(df_rms, bda_config, output_metrics)
-
-        print(f"[Metrics] Validating baseline dependency")
-        validate_baseline_dependency(df_baseline_dependency, bda_config, output_metrics)
-
-        print(f"[Metrics] Calculating UV coverage")
-        calculate_coverage_uv(df_coverage_uv, output_coverage)
+        return df_scientific, df_averaging
 
     except Exception as e:
-        print(f"[Metrics] Error calculating metrics: {e}")
+        print(f"[Evaluation] Error preparing dataframes: {e}")
         traceback.print_exc()
         raise

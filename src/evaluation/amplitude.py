@@ -1,9 +1,9 @@
 import traceback
 import numpy as np
+import pandas as pd
 
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, DoubleType, LongType, StringType
-import pandas as pd
 
 
 def amplitude(df_scientific, df_averaging):
