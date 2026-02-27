@@ -26,7 +26,7 @@ def create_dask_client():
         client = Client(
             n_workers           = 1,
             threads_per_worker  = 4,
-            memory_limit        = "600GB",
+            memory_limit        = "660GB",
             processes           = True,
             local_directory     = tmp,
         )

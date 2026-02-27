@@ -52,8 +52,8 @@ def generate_dirty_image(grids, weights, grid_config, slurm_job_id):
     dirty_image = fft(grids, weights, grid_config, type="dirty")
     psf_image = fft(grids, weights, grid_config, type="psf")
 
-    output_dirty_image = f"./output/dirtyimage_{slurm_job_id}.png"
-    output_psf_image = f"./output/psf_{slurm_job_id}.png"
+    output_dirty_image = f"./output/{slurm_job_id}/dirtyimage_{slurm_job_id}.png"
+    output_psf_image = f"./output/{slurm_job_id}/psf_{slurm_job_id}.png"
 
     save_dirty_image(dirty_image, output_dirty_image)
     save_psf_image(psf_image, output_psf_image)

@@ -13,8 +13,8 @@ def calculate_metrics(df_scientific, df_averaging, bda_config, slurm_job_id):
         df_amplitude = amplitude(df_scientific, df_averaging)
         df_rms = rms(df_scientific, df_averaging)
 
-        output_metrics = f"./output/metrics_{slurm_job_id}.txt"
-        output_coverage = f"./output/coverage_uv_{slurm_job_id}.png"
+        output_metrics = f"./output/{slurm_job_id}/metrics_{slurm_job_id}.txt"
+        output_coverage = f"./output/{slurm_job_id}/coverage_uv_{slurm_job_id}.png"
 
         print(f"[Evaluation] Calculating amplitude error")
         calculate_amplitude_error(df_amplitude, bda_config, output_metrics)

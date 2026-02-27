@@ -235,4 +235,4 @@ def generate_dataset(antenna_config_path, sim_config):
     # Run simulation
     dataset = simulate_dataset(interferometer, sources=composite_source)
 
-    return dataset
+    return dataset, interferometer
