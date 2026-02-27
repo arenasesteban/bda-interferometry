@@ -40,17 +40,21 @@ def update_bda_config(config_path, lambda_ref, min_diameter, threshold):
         with open(config_path, 'r') as f:
             config = json.load(f)
     
-        config["threshold_baseline"] = float(threshold)
         config["lambda_ref"] = lambda_ref
 
         if config["fov_strategy"] == "DERIVED":
             config["fov"] = float(1.02 * lambda_ref / min_diameter)
-        
         elif config["fov_strategy"] == "FIXED":
-            config["fov"] = 0.0006  # Default fixed FOV in radians
-        
+            config["fov"] = 0.0002  # Default fixed FOV in radians
         else:
             raise ValueError(f"Invalid fov_strategy. Supported strategies: {STRATEGY}")
+        
+        if config["threshold_strategy"] == "DERIVED":
+            config["threshold"] = float(threshold)
+        elif config["threshold_strategy"] == "FIXED":
+            config["threshold"] = 50000
+        else:
+            raise ValueError(f"Invalid threshold_strategy. Supported strategies: {STRATEGY}")
 
         with open(config_path, "w") as f:
             json.dump(config, f, indent=4)

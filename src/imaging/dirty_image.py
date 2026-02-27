@@ -58,4 +58,7 @@ def generate_dirty_image(grids, weights, grid_config, slurm_job_id):
     save_dirty_image(dirty_image, output_dirty_image)
     save_psf_image(psf_image, output_psf_image)
 
-    return output_dirty_image, output_psf_image
+    print(f"[Imaging] ✓ Dirty image saved to: {output_dirty_image}")
+    print(f"[Imaging] ✓ PSF image saved to: {output_psf_image}")
+
+    plt.close('all')

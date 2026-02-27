@@ -4,7 +4,9 @@ Consumer Service - Interferometry Data Processing
 This service consumes visibility data chunks from a Kafka topic, processes them using a distributed BDA pipeline and gridding, and generates dirty images.
 """
 
+import hashlib
 import io
+import os
 import sys
 import argparse
 import time
@@ -281,16 +283,13 @@ def consolidate_processing(grid, num_partitions, grid_config, slurm_job_id):
         print(f"[Imaging] Building array from gridded data")
 
         time_start = time.time()
-        grids, weights = build_grid(df_gridded, grid_config)
+        grids, weights = build_grid(df_gridded, grid_config, num_partitions)
         time_end = time.time()
         print(f"[Imaging] ✓ Grid built in {time_end - time_start:.1f} seconds")
         
         print(f"[Imaging] Generating dirty image")
         
-        output_dirty_image, output_psf_image = generate_dirty_image(grids, weights, grid_config, slurm_job_id)
-
-        print(f"[Imaging] ✓ Dirty image saved to: {output_dirty_image}")
-        print(f"[Imaging] ✓ PSF image saved to: {output_psf_image}")
+        generate_dirty_image(grids, weights, grid_config, slurm_job_id)
 
         df_grid.unpersist()
 
@@ -298,13 +297,13 @@ def consolidate_processing(grid, num_partitions, grid_config, slurm_job_id):
         print("[Consumer] No data processed, no image generated")
 
 
-def generate_metrics(averaged, windowed, num_partitions, bda_config, slurm_job_id):
-    if averaged and windowed:
-        df_averaged = reduce(DataFrame.unionByName, averaged)
+def generate_metrics(windowed, averaged, num_partitions, bda_config, slurm_job_id):
+    if windowed and averaged:
         df_windowed = reduce(DataFrame.unionByName, windowed)
+        df_averaged = reduce(DataFrame.unionByName, averaged)
 
-        df_averaged = df_averaged.repartition(num_partitions * 2, "baseline_key")
-        df_windowed = df_windowed.repartition(num_partitions * 2, "baseline_key")
+        df_windowed = df_windowed.repartition(num_partitions * 3, "baseline_key")
+        df_averaged = df_averaged.repartition(num_partitions * 3, "baseline_key")
 
         print(f"[Evaluation] Starting metrics calculation")
 
@@ -412,7 +411,7 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
 
         # Generate metrics
         if bda_config["decorr_factor"] < 1.0:
-            generate_metrics(averaged, windowed, num_partitions, bda_config, slurm_job_id)
+            generate_metrics(windowed, averaged, num_partitions, bda_config, slurm_job_id)
 
         print("[Consumer] Consumer finished processing")
 
