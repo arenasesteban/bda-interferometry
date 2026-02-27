@@ -38,6 +38,9 @@ def calculate_coverage_uv(df_scientific, df_averaging, output_coverage):
         u_averaging = np.array([row['u_averaged'] for row in df_uv_averaging if row['u_averaged'] is not None])
         v_averaging = np.array([row['v_averaged'] for row in df_uv_averaging if row['v_averaged'] is not None])
 
+        print(f"[Evaluation] Length of scientific UV:  ({len(u_scientific), len(v_scientific)})")
+        print(f"[Evaluation] Length of averaging UV:   ({len(u_averaging), len(v_averaging)})")
+
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
         
         # Original
@@ -82,7 +85,9 @@ def calculate_coverage_uv(df_scientific, df_averaging, output_coverage):
         plt.savefig(output_coverage.replace('.png', '_overlay.png'), dpi=150, bbox_inches='tight')
         plt.close(fig)
 
-        print("[Metrics] ✓ UV Coverage visualization completed successfully.")
+        plt.close('all')
+
+        print("[Evaluation] ✓ UV Coverage visualization completed successfully.")
 
     except Exception as e:
         print(f"Error calculating coverage UV values: {e}")

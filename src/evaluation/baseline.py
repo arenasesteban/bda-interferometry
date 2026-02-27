@@ -40,10 +40,11 @@ def validate_baseline_dependency(df_scientific, df_averaging, bda_config, output
     try:
 
         df_baseline_dependency = calculate_baseline_dependency(df_scientific, df_averaging)
-        short_threshold = bda_config.get('threshold_baseline', 2000.0)
+        threshold = bda_config.get('threshold', 2000.0)
+        decorr_factor = bda_config.get('decorr_factor', 0.95)
 
-        short_baselines = df_baseline_dependency.filter(F.col('baseline_length') < short_threshold)
-        long_baselines  = df_baseline_dependency.filter(F.col('baseline_length') >= short_threshold)
+        short_baselines = df_baseline_dependency.filter(F.col('baseline_length') < threshold)
+        long_baselines  = df_baseline_dependency.filter(F.col('baseline_length') >= threshold)
 
         def group_stats(df):
             row = df.agg(
@@ -65,14 +66,14 @@ def validate_baseline_dependency(df_scientific, df_averaging, bda_config, output
         total_ratio = total_before / total_after  if total_after else float('inf')
 
         write_baseline_dependency_results(
-            short_threshold,
+            threshold, decorr_factor,
             total_baselines, total_before, total_after, total_ratio,
             short_n, short_before, short_after, short_ratio,
             long_n,  long_before,  long_after,  long_ratio,
             output_file
         )
 
-        print("[Metrics] ✓ Baseline Dependency validation completed successfully.")
+        print("[Evaluation] ✓ Baseline Dependency validation completed successfully.")
 
     except Exception as e:
         print(f"Error validating baseline dependency: {e}")
@@ -81,7 +82,7 @@ def validate_baseline_dependency(df_scientific, df_averaging, bda_config, output
 
 
 def write_baseline_dependency_results(
-    short_threshold,
+    threshold, decorr_factor,
     total_baselines, total_before, total_after, total_ratio,
     short_n, short_before, short_after, short_ratio,
     long_n,  long_before,  long_after,  long_ratio,
@@ -94,19 +95,23 @@ def write_baseline_dependency_results(
             f.write(f"{'=' * 80}\n")
             f.write(f"Metric: Compression Ratio = rows_before_BDA / rows_after_BDA\n\n")
 
-            f.write(f"GLOBAL SUMMARY:\n")
+            f.write(f"Parameters:\n")
+            f.write(f"  Baseline threshold:     {threshold}\n")
+            f.write(f"  Decorrelation factor:   {decorr_factor}\n\n")
+
+            f.write(f"Global summary:\n")
             f.write(f"  Total baselines:     {total_baselines}\n")
             f.write(f"  Total rows before:   {total_before}\n")
             f.write(f"  Total rows after:    {total_after}\n")
-            f.write(f"  Compression ratio:   {total_ratio:.2f}x\n\n")
+            f.write(f"  Compression ratio:   {total_ratio:.2f}x\n")
 
-            f.write(f"SHORT BASELINES (< {short_threshold} m):\n")
+            f.write(f"Short baselines (< {threshold} m):\n")
             f.write(f"  Count:               {short_n}\n")
             f.write(f"  Rows before BDA:     {short_before}\n")
             f.write(f"  Rows after  BDA:     {short_after}\n")
             f.write(f"  Compression ratio:   {short_ratio:.2f}x\n\n")
 
-            f.write(f"LONG BASELINES (>= {short_threshold} m):\n")
+            f.write(f"Long baselines (>= {threshold} m):\n")
             f.write(f"  Count:               {long_n}\n")
             f.write(f"  Rows before BDA:     {long_before}\n")
             f.write(f"  Rows after  BDA:     {long_after}\n")
