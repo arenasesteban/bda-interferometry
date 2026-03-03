@@ -4,9 +4,7 @@ Consumer Service - Interferometry Data Processing
 This service consumes visibility data chunks from a Kafka topic, processes them using a distributed BDA pipeline and gridding, and generates dirty images.
 """
 
-import hashlib
 import io
-import os
 import sys
 import argparse
 import time
@@ -329,9 +327,7 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
 
     print(f"[Consumer] ✓ Spark session created with {spark.sparkContext.defaultParallelism} cores and {num_partitions} partitions")
 
-    try:        
-        bda_config = load_bda_config(bda_config_path)
-        grid_config = load_grid_config(grid_config_path)
+    try:
         visibility_schema = define_visibility_schema()
 
         kafka_stream = create_kafka_stream(spark, bootstrap_server, topic)
@@ -340,6 +336,7 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
         stream_state = {'signal_received': False}
 
         processing_time = {}
+        bda_config, grid_config = None, None
 
         def process_batch(df_scientific, epoch_id):    
             df_filtered, stream_ended = check_end_signal(df_scientific, epoch_id)
@@ -350,6 +347,9 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
             
             if not processing_time:
                 processing_time["start"] = time.time()
+                
+                bda_config = load_bda_config(bda_config_path)
+                grid_config = load_grid_config(grid_config_path)
 
             processing_time[epoch_id] = { "start": time.time() }
 

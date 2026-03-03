@@ -6,6 +6,8 @@ import traceback
 import astropy.units as u
 from pathlib import Path
 from astropy.constants import c
+import numpy as np
+
 
 # Configuration constants
 DEFAULT_KAFKA_SERVERS = ['localhost:9092']
@@ -28,6 +30,7 @@ def load_simulation_config(config_path):
         try:
             with open(config_path, 'r') as f:
                 return json.load(f)
+        
         except (json.JSONDecodeError, IOError) as e:
             print(f"Warning: Could not load config file {config_path}: {e}")
             print("Using default configuration.")
@@ -35,7 +38,7 @@ def load_simulation_config(config_path):
     return {}
 
 
-def update_bda_config(config_path, lambda_ref, min_diameter, threshold):
+def update_bda_config(config_path, lambda_ref, max_diameter, threshold):
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
@@ -43,16 +46,16 @@ def update_bda_config(config_path, lambda_ref, min_diameter, threshold):
         config["lambda_ref"] = lambda_ref
 
         if config["fov_strategy"] == "DERIVED":
-            config["fov"] = float(1.02 * lambda_ref / min_diameter)
+            config["fov"] = float(0.55 * lambda_ref / (np.pi * max_diameter))
         elif config["fov_strategy"] == "FIXED":
-            config["fov"] = 0.0002  # Default fixed FOV in radians
+            config["fov"] = config.get("fov", 0.0001)  # Keep the existing fixed value
         else:
             raise ValueError(f"Invalid fov_strategy. Supported strategies: {STRATEGY}")
         
         if config["threshold_strategy"] == "DERIVED":
             config["threshold"] = float(threshold)
         elif config["threshold_strategy"] == "FIXED":
-            config["threshold"] = 50000
+            config["threshold"] = config.get("threshold", 5000.0)  # Keep the existing fixed value
         else:
             raise ValueError(f"Invalid threshold_strategy. Supported strategies: {STRATEGY}")
 
@@ -125,7 +128,7 @@ def run_producer(antenna_config_path, simulation_config_path, topic):
         update_bda_config(
             config_path="./configs/bda_config.json",
             lambda_ref=dataset.spws.lambda_ref,
-            min_diameter=dataset.antenna.min_diameter,
+            max_diameter=interferometer.antenna_array.get_array_extent()[1].compute(),
             threshold=interferometer.antenna_array.get_median_antenna_separation().compute()
         )
         print("✓ BDA configuration updated.", flush=True)
