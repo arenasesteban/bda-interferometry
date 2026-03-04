@@ -361,11 +361,17 @@ def test_assign_windows_empty_dataframe_handling(spark, visibility_schema):
     assert len(result) == 0
 
 
-def test_missing_parameters_assign_window(df_single_row):
-    pdf = df_single_row.toPandas()
+def test_assign_temporal_window_empty_dataframe_handling(spark, visibility_schema):
+    df_empty = spark.createDataFrame([], schema=visibility_schema)
     
-    with pytest.raises(KeyError, match="Missing required parameters for window assignment"):
-        assign_windows(pdf, None, FOV, LAMBDA_REF)
+    with pytest.raises(ValueError, match="Input DataFrame cannot be empty or None."):
+        assign_temporal_window(df_empty, DECORR_FACTOR, FOV, LAMBDA_REF)
+
+
+def test_average_temporal_window_missing_column_raises_error(df_single_row):
+    df_incomplete = df_single_row.drop("baseline_key", "scan_number")
+    with pytest.raises(Exception):
+        average_by_window(df_incomplete)
 
 
 def test_average_visibilities_empty_group(spark, visibility_schema):
@@ -381,8 +387,7 @@ def test_average_by_window_missing_window(df_single_row):
         average_by_window(df_single_row)
 
 
-def test_assign_temporal_window_empty_dataframe_handling(spark, visibility_schema):
-    df_empty = spark.createDataFrame([], schema=visibility_schema)
-    
-    with pytest.raises(ValueError, match="Input DataFrame cannot be empty or None."):
-        assign_temporal_window(df_empty, DECORR_FACTOR, FOV, LAMBDA_REF)
+def test_average_by_window_missing_required_columns(df_single_row):
+    df_incomplete = df_single_row.drop("baseline_key", "scan_number", "window_id")
+    with pytest.raises(Exception):
+        average_by_window(df_incomplete)

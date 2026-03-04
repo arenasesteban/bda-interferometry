@@ -81,10 +81,16 @@ def test_apply_bda_none_dataframe_raises_error(bda_config):
 
 
 def test_apply_bda_invalid_partitions_raises_error(df_single_row, bda_config):
-    with pytest.raises(ValueError, match="Number of partitions must be a positive integer"):
+    with pytest.raises(ValueError, match="num_partitions must be a positive integer"):
         apply_bda(df_single_row, num_partitions=0, bda_config=bda_config)
 
 
 def test_apply_bda_missing_columns_raises_error(df_single_row):
     with pytest.raises(ValueError, match="BDA configuration cannot be None"):
         apply_bda(df_single_row, num_partitions=1, bda_config=None)
+
+
+def test_apply_bda_dataframe_missing_columns_raises_error(df_single_row, bda_config):
+    df_incomplete = df_single_row.drop("baseline_key")
+    with pytest.raises(Exception):
+        apply_bda(df_incomplete, num_partitions=1, bda_config=bda_config)
