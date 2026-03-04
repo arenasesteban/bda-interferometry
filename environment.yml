@@ -11,10 +11,16 @@ dependencies:
   - astropy
   - dask
   - ipykernel
-  - pip
+
   - pyspark=3.5.0
   - findspark
   - openjdk=11
+  
+  - pytest
+  - pytest-cov
+  - pytest-mock
+
+  - pip
   - pip:
     - kafka-python
     - msgpack

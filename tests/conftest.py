@@ -1,5 +1,6 @@
 import pytest
-import json
+import numpy as np
+from unittest.mock import MagicMock
 
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
@@ -366,3 +367,135 @@ def bda_config():
         "lambda_ref": 0.1,
         "fov": 1.0
     }
+
+
+# Fixtures for simulation tests
+
+@pytest.fixture
+def mock_interferometer():
+    interferometer = MagicMock()
+    positions = MagicMock()
+    positions.shape = (4, 3)
+    interferometer.antenna_array.positions = positions
+    diameters_mock = MagicMock()
+    diameters_mock.compute.return_value = np.array([12.0] * 4)
+    interferometer.antenna_array.diameters = diameters_mock
+    return interferometer
+
+
+@pytest.fixture
+def base_sim_config():
+    return {
+        "interferometer": "OTHER",
+        "freq_min": 1.0,
+        "freq_max": 2.0,
+        "n_chans": 4,
+        "observation_time": 3600,
+        "declination": "-30d",
+        "integration_time": 10,
+        "spectral_index": -0.7,
+        "flux_density": 1.0,
+    }
+
+
+@pytest.fixture
+def ska_sim_config():
+    return {
+        "interferometer": "SKA",
+        "array_type": "MID",
+        "assembly": "AA2",
+        "freq_min": 350.0,
+        "freq_max": 1050.0,
+        "n_chans": 4,
+        "observation_time": 3600,
+        "declination": "-30d",
+        "integration_time": 10,
+        "spectral_index": -0.7,
+        "source_path": "/fake/source.fits",
+    }
+
+
+# Fixture for extraction tests
+
+NROWS = 5
+NCHAN = 4
+NCORR = 2
+
+@pytest.fixture
+def valid_data():
+    rng = np.random.default_rng(0)
+    return (
+        np.arange(NROWS, dtype=np.int32),                              # 0  antenna1
+        np.arange(NROWS, dtype=np.int32) + 1,                         # 1  antenna2
+        np.ones(NROWS, dtype=np.int32),                                # 2  scan_number
+        np.linspace(0.0, 1.0, NROWS),                                  # 3  time
+        np.ones(NROWS) * 10.0,                                         # 4  exposure
+        np.ones(NROWS) * 10.0,                                         # 5  interval
+        rng.random((NROWS, 3)),                                        # 6  uvw
+        rng.random((NROWS, NCHAN, NCORR)) + 1j * rng.random((NROWS, NCHAN, NCORR)),  # 7  vis
+        rng.random((NROWS, NCHAN)),                                    # 8  weight
+        np.zeros((NROWS, NCHAN), dtype=np.bool_),                      # 9  flag
+        np.zeros(NROWS),                                               # 10 unused
+        np.zeros(NROWS),                                               # 11 unused
+    )
+
+
+@pytest.fixture
+def valid_metadata():
+    return {
+        "subms_id": 0,
+        "field_id": 1,
+        "spw_id": 2,
+        "polarization_id": 0,
+        "n_channels": NCHAN,
+        "n_correlations": NCORR,
+    }
+
+
+@pytest.fixture
+def mock_producer():
+    producer = MagicMock()
+    producer.send.return_value.get.return_value = None
+    return producer
+
+
+@pytest.fixture
+def mock_dataset():
+    row_chunks = (NROWS,)
+
+    def _make_dask_array(ndim):
+        arr = MagicMock()
+        arr.chunks = (row_chunks,) + ((-1,),) * (ndim - 1)
+        arr.shape = (NROWS,) + (4,) * (ndim - 1)
+        arr.rechunk.return_value = arr
+        return arr
+
+    ds = MagicMock()
+    ds.nrows = NROWS
+
+    ds.data.data = _make_dask_array(3)
+    ds.data.data.chunks = (row_chunks, (4,), (2,))
+    ds.data.shape = (NROWS, NCHAN, NCORR)
+
+    ds.antenna1.data = _make_dask_array(1)
+    ds.antenna2.data = _make_dask_array(1)
+    ds.scan_number.data = _make_dask_array(1)
+    ds.time.data = _make_dask_array(1)
+    ds.dataset.EXPOSURE.data = _make_dask_array(1)
+    ds.dataset.INTERVAL.data = _make_dask_array(1)
+    ds.uvw.data = _make_dask_array(2)
+    ds.weight.data = _make_dask_array(2)
+    ds.flag.data = _make_dask_array(2)
+
+    return ds
+
+
+@pytest.fixture
+def mock_subms():
+    """Mock de SubMS con los campos de metadata requeridos."""
+    subms = MagicMock()
+    subms.id = 0
+    subms.field_id = 1
+    subms.spw_id = 2
+    subms.polarization_id = 0
+    return subms
