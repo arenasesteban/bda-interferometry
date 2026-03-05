@@ -1,6 +1,8 @@
 import pytest
 import numpy as np
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
+import json
+import pandas as pd
 
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
@@ -43,6 +45,18 @@ def visibility_schema():
         StructField("visibility", ArrayType(ArrayType(ArrayType(DoubleType()))), True),
         StructField("weight", ArrayType(ArrayType(DoubleType())), True),
         StructField("flag", ArrayType(ArrayType(IntegerType())), True),
+    ])
+
+
+@pytest.fixture
+def gridded_schema():
+    """Schema for gridded visibilities DataFrame"""
+    return StructType([
+        StructField("u_pix", IntegerType(), False),
+        StructField("v_pix", IntegerType(), False),
+        StructField("vs_real", DoubleType(), False),
+        StructField("vs_imag", DoubleType(), False),
+        StructField("weight", DoubleType(), False)
     ])
 
 
@@ -499,3 +513,192 @@ def mock_subms():
     subms.spw_id = 2
     subms.polarization_id = 0
     return subms
+
+
+# Fixtures for gridding tests
+
+IMG_SIZE = 8
+PADDING_FACTOR = 1.0
+PADDED_SIZE = IMG_SIZE  # IMG_SIZE * PADDING_FACTOR
+
+
+@pytest.fixture
+def grid_config():
+    """Create a basic grid configuration"""
+    return {
+        "img_size": 8,
+        "padding_factor": 1.0,
+        "cellsize": 1e-5,
+        "chan_freq": [1.4e9],
+        "corrs_string": "XX,YY"
+    }
+
+
+@pytest.fixture
+def grid_config_with_padding():
+    """Create grid configuration with padding > 1"""
+    return {
+        "img_size": 8,
+        "padding_factor": 2.0,
+        "cellsize": 1e-5,
+        "chan_freq": [1.4e9],
+        "corrs_string": "XX,YY"
+    }
+
+
+@pytest.fixture
+def grid_array():
+    """Create a sample 8x8 complex grid for testing"""
+    return np.random.random((8, 8)) + 1j * np.random.random((8, 8))
+
+
+@pytest.fixture
+def weight_array():
+    """Create a sample 8x8 weight array for testing"""
+    return np.random.random((8, 8)) + 0.1  # Add offset to avoid zeros
+
+@pytest.fixture
+def image_2d():
+    """Create a sample 2D image for testing save functions"""
+    return np.random.random((8, 8))
+
+
+@pytest.fixture()
+def df_in_range(spark, visibility_schema):
+    row = _base_row(time=0.0, u=0.0, v=0.0)
+    return spark.createDataFrame([row], schema=visibility_schema)
+
+
+@pytest.fixture
+def sample_row():
+    """Create a pandas Series mimicking a row from a DataFrame"""
+    return pd.Series({
+        'u': 100.0,
+        'v': 50.0,
+        'visibility': [[[1.0, 0.5], [2.0, 1.0]]],  # 1 channel, 2 correlations
+        'weight': [[1.0, 1.0]],
+        'flag': [[0, 0]],
+        'n_channels': 1,
+        'n_correlations': 2,
+        'is_hermitian': False
+    })
+    
+
+@pytest.fixture
+def df_gridding(spark, gridded_schema):
+    """Create a sample gridded DataFrame for testing"""
+    rows = [
+        (0, 0, 1.0, 0.0, 1.0),
+        (1, 1, 2.0, 1.0, 1.5),
+        (2, 2, 3.0, 2.0, 2.0),
+        (3, 3, 4.0, 3.0, 2.5)
+    ]
+    return spark.createDataFrame(rows, schema=gridded_schema)
+
+
+@pytest.fixture
+def _write_grid_config(tmp_path, grid_config):
+    path = tmp_path / "grid_config.json"
+    path.write_text(json.dumps({
+        "img_size": grid_config["img_size"],
+        "padding_factor": grid_config["padding_factor"],
+        "cellsize": grid_config["cellsize"],
+    }), encoding="utf-8")
+    return path
+
+# Fixture for testing grid config updates
+
+@pytest.fixture
+def tmp_antenna_config(tmp_path):
+    """Create a temporary antenna configuration file"""
+    config_file = tmp_path / "antenna.cfg"
+    config_file.write_text("# Dummy antenna config")
+    return str(config_file)
+
+
+@pytest.fixture
+def tmp_sim_config(tmp_path):
+    """Create a temporary simulation configuration file"""
+    config_file = tmp_path / "sim_config.json"
+    sim_config = {
+        "interferometer": "VLA",
+        "freq_min": 1.0,
+        "freq_max": 2.0,
+        "n_chans": 4
+    }
+    config_file.write_text(json.dumps(sim_config))
+    return str(config_file)
+
+
+@pytest.fixture
+def mock_dataset_producer():
+    """Create a mock dataset with all required attributes"""
+    dataset = Mock()
+    
+    # spws attributes
+    dataset.spws = Mock()
+    dataset.spws.lambda_ref = 0.21  # meters
+    dataset.spws.dataset = [Mock()]
+    
+    # First SPW with CHAN_FREQ
+    first_spw = dataset.spws.dataset[0]
+    mock_chan_freq = Mock()
+    # Return numpy array instead of list
+    mock_values = Mock()
+    mock_values.values = np.array([[1.4e9, 1.5e9, 1.6e9]])
+    mock_chan_freq.compute.return_value = mock_values
+    first_spw.CHAN_FREQ = mock_chan_freq
+    
+    # Other attributes
+    dataset.theo_resolution = 1e-5
+    dataset.polarization = Mock()
+    dataset.polarization.corrs_string = "XX,YY"
+    
+    # ms_list for streaming
+    dataset.ms_list = []
+    
+    return dataset
+
+
+@pytest.fixture
+def mock_interferometer_producer():
+    """Create a mock interferometer with all required attributes"""
+    interferometer = Mock()
+    interferometer.antenna_array = Mock()
+    
+    # Mock get_array_extent to return (min, max)
+    mock_extent = Mock()
+    mock_extent.compute.return_value = 25.0  # max diameter
+    interferometer.antenna_array.get_array_extent.return_value = (0, mock_extent)
+    
+    # Mock get_median_antenna_separation
+    mock_separation = Mock()
+    mock_separation.compute.return_value = 100.0
+    interferometer.antenna_array.get_median_antenna_separation.return_value = mock_separation
+    
+    return interferometer
+
+
+@pytest.fixture
+def tmp_bda_config(tmp_path):
+    """Create a temporary BDA configuration file"""
+    config_file = tmp_path / "bda_config.json"
+    bda_config = {
+        "fov_strategy": "DERIVED",
+        "threshold_strategy": "DERIVED"
+    }
+    config_file.write_text(json.dumps(bda_config))
+    return str(config_file)
+
+
+@pytest.fixture
+def tmp_grid_config(tmp_path):
+    """Create a temporary grid configuration file"""
+    config_file = tmp_path / "grid_config.json"
+    grid_config = {
+        "cellsize_strategy": "DERIVED",
+        "img_size": 512,
+        "padding_factor": 2.0
+    }
+    config_file.write_text(json.dumps(grid_config))
+    return str(config_file)
