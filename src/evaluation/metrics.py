@@ -40,7 +40,7 @@ def calculate_metrics(df_scientific, df_averaging, bda_config, slurm_job_id):
 
 def prepare_dataframes(df_scientific, df_averaging):
     try:
-        cols = ["baseline_key", "window_id", "u", "v", "visibility", "flag"]
+        cols = ["baseline_key", "window_id", "u", "v", "w", "visibility", "flag"]
         df_scientific = df_scientific.select(cols)
         df_averaging = df_averaging.select(cols)
 
