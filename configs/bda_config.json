@@ -1,9 +1,8 @@
 {
-    "fov": 0.0006,
-    "fov_strategy": "FIXED",
     "decorr_factor": 0.95,
-    "amplitude_tolerance": 1,
-    "rms_tolerance": 1,
-    "threshold_baseline": 2865.88623046875,
-    "lambda_ref": 0.22124904649446492
+    "lambda_ref": 0.22124904649446492,
+    "fov": 0.0008358297312013119,
+    "threshold": 264.70588235294116,
+    "amplitude_tolerance": 0.01,
+    "rms_tolerance": 0.02
 }

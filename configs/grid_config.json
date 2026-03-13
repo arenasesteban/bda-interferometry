@@ -1,9 +1,9 @@
 {
     "weight_scheme": "UNIFORM",
-    "img_size": 1024,
-    "padding_factor": 1.2,
-    "cellsize": 1.524459633889902e-07,
-    "cellsize_strategy": "DERIVED",
+    "img_size": 512,
+    "padding_factor": 1.0,
+    "cellsize": 4.84813681109536e-07,
+    "cellsize_strategy": "FIXED",
     "cellsize_flag": false,
     "corrs_string": [
         [

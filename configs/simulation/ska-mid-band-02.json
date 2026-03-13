@@ -1,7 +1,7 @@
 {
     "interferometer": "SKA",
     "array_type": "MID",
-    "assembly": "AA4",
+    "assembly": "AA*",
     "freq_min": 950,
     "freq_max": 1760,
     "n_chans": 50,
