@@ -5,23 +5,13 @@ import argparse
 import traceback
 import astropy.units as u
 from pathlib import Path
-from astropy.constants import c
-import numpy as np
-
-
-# Configuration constants
-DEFAULT_KAFKA_SERVERS = ['localhost:9092']
-DEFAULT_TOPIC = 'visibility-stream'
-
-# Add src directory to path
-project_root = Path(__file__).parent.parent
-src_path = project_root / "src"
-sys.path.append(str(src_path))
 
 from data.simulation import generate_dataset
 from data.extraction import stream_dataset
 
-# Supported padding strategies
+
+# Configuration constants
+DEFAULT_TOPIC = 'visibility-stream'
 STRATEGY = ["FIXED", "DERIVED"]
 
 
@@ -38,19 +28,20 @@ def load_simulation_config(config_path):
     return {}
 
 
-def update_bda_config(config_path, lambda_ref, min_diameter, threshold):
+def update_bda_config(config_path, lambda_ref, min_diameter, offset):
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
 
         fov = float(1.02 * lambda_ref / min_diameter)
         theta_fov = fov / 2
-        theta_max = theta_fov * 0.01 # Set fov to 1% of the primary beam FOV
+        theta_max = theta_fov * offset
+        threshold = lambda_ref / (theta_fov * offset)
         
         config["lambda_ref"] = lambda_ref
         config["fov"] = fov
         config["theta_max"] = theta_max
-        config["threshold"] = lambda_ref / (theta_fov * 0.01) # Set threshold to 1% of the primary beam FOV
+        config["threshold"] = threshold
 
         with open(config_path, "w") as f:
             json.dump(config, f, indent=4)
@@ -88,9 +79,14 @@ def update_grid_config(config_path, theo_resolution, corrs_string, chan_freq):
         raise
 
 
-def stream_kafka(dataset, topic):
+def stream_kafka(dataset, topic, bootstrap_servers, run_id):
     try:
-        print(f"[Producer] Starting to stream dataset to Kafka topic '{topic}'...")
+        print(f"[Producer] Run ID: {run_id}")
+        print(f"[Producer] Kafka: {bootstrap_servers}")
+        print(f"[Producer] Topic: {topic}")
+        print(f"[Producer] Starting streaming...")
+
+
         if not hasattr(dataset, "ms_list") or dataset.ms_list is None:
             raise ValueError("Dataset does not contain 'ms_list' or it is None.")
 
@@ -100,7 +96,7 @@ def stream_kafka(dataset, topic):
 
             stream_dataset(subms.visibilities, subms, dataset.antenna, topic)
 
-        print(f"[Producer] Finished streaming dataset to Kafka topic '{topic}'.")
+        print(f"[Producer] Finished streaming.")
     
     except Exception as e:
         print(f"[Producer] Unexpected error during streaming: {e}")
@@ -108,34 +104,35 @@ def stream_kafka(dataset, topic):
         raise
 
 
-def run_producer(antenna_config_path, simulation_config_path, topic):
-    if topic is None:
-        topic = DEFAULT_TOPIC
-    
+def run_producer(
+    topic, bootstrap_servers, run_id, 
+    antenna_config_path, simulation_config_path, 
+    bda_config_path, grid_config_path, offset
+):
     try:
         sim_config = load_simulation_config(simulation_config_path)
         print("✓ Loaded simulation configuration.", flush=True)
 
-        dataset, interferometer = generate_dataset(antenna_config_path, sim_config)
+        dataset = generate_dataset(antenna_config_path, sim_config)
         print("✓ Dataset generation complete.", flush=True)
 
         update_bda_config(
-            config_path="./configs/bda_config.json",
+            config_path=bda_config_path,
             lambda_ref=dataset.spws.lambda_ref,
             min_diameter=dataset.antenna.min_diameter,
-            threshold=interferometer.antenna_array.get_median_antenna_separation().compute()
+            offset=offset
         )
         print("✓ BDA configuration updated.", flush=True)
 
         update_grid_config(
-            config_path="./configs/grid_config.json",
+            config_path=grid_config_path,
             theo_resolution=dataset.theo_resolution,
             corrs_string=dataset.polarization.corrs_string,
             chan_freq=dataset.spws.dataset[0].CHAN_FREQ.compute().values[0].tolist()
         )
         print("✓ Grid configuration updated.", flush=True)
 
-        streaming_results = stream_kafka(dataset, topic)
+        streaming_results = stream_kafka(dataset, topic, bootstrap_servers, run_id)
         print("✓ Streaming complete.", flush=True)
 
         return streaming_results
@@ -147,22 +144,67 @@ def run_producer(antenna_config_path, simulation_config_path, topic):
 
 
 def main():
-    """
-    Main entry point for the producer service.
-    """
-    parser = argparse.ArgumentParser(description="BDA Interferometry Producer Service")
+    parser = argparse.ArgumentParser(
+        description="BDA Interferometry Producer Service",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter    
+    )
     
-    parser.add_argument("--antenna-config", help="Path to antenna configuration file")
-    parser.add_argument("--simulation-config", help="Path to simulation configuration file")
-    parser.add_argument("--topic", help=f"Kafka topic name")
+    parser.add_argument(
+        "--topic",
+        required=False,
+        default=DEFAULT_TOPIC,
+        help="Kafka topic to stream the dataset to."
+    )
+    parser.add_argument(
+        "--bootstrap-servers",
+        required=False,
+        help="Kafka bootstrap server address."
+    )
+    parser.add_argument(
+        "--run-id",
+        required=False,
+        help="Unique identifier for this run."
+    )
+
+    parser.add_argument(
+        "--antenna-config",
+        required=True, 
+        help="Path to antenna configuration file"
+    )
+    parser.add_argument(
+        "--simulation-config",
+        required=True, 
+        help="Path to simulation configuration file"
+    )
+    parser.add_argument(
+        "--bda-config",
+        required=True,
+        help="Path to BDA configuration file"
+    )
+    parser.add_argument(
+        "--grid-config",
+        required=True,
+        help="Path to grid configuration file"
+    )
+    parser.add_argument(
+        "--offset",
+        type=float,
+        default=0.01,
+        help="Offset factor for Field of View objective size."
+    )
 
     args = parser.parse_args()
 
     try:
         run_producer(
+            topic=args.topic,
+            bootstrap_servers=args.bootstrap_servers,
+            run_id=args.run_id,
             antenna_config_path=args.antenna_config,
             simulation_config_path=args.simulation_config,
-            topic=args.topic
+            bda_config_path=args.bda_config,
+            grid_config_path=args.grid_config,
+            offset=args.offset
         )
     
     except Exception as e:

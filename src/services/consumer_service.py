@@ -28,11 +28,11 @@ project_root = Path(__file__).parent.parent
 src_path = project_root / "src"
 sys.path.append(str(src_path))
 
-from bda.bda_config import load_bda_config
-from bda.bda_integration import apply_bda
-from imaging.gridding import apply_gridding, load_grid_config, build_grid
-from imaging.dirty_image import generate_dirty_image
-from evaluation.metrics import calculate_metrics
+from core.bda.bda_config import load_bda_config
+from core.bda.bda_integration import apply_bda
+from core.imaging.gridding import apply_gridding, load_grid_config, build_grid
+from core.imaging.dirty_image import generate_dirty_image
+from core.evaluation.metrics import calculate_metrics
 
 
 def create_spark_session():
@@ -320,13 +320,13 @@ def generate_metrics(windowed, averaged, num_partitions, bda_config, slurm_job_i
         print("[Consumer] No processed data samples available for metrics")
 
 
-def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slurm_job_id):
+def run_consumer(topic, bootstrap_server, run_id, bda_config_path, grid_config_path, decorr_factor):
     print("=" * 80)
-    print(f"[Consumer] Starting service")
+    print(f"[Consumer] Starting BDA Interferometry Consumer Service")
+    print(f"[Consumer] Run ID: {run_id}")
     print(f"[Consumer] Kafka: {bootstrap_server}")
     print(f"[Consumer] Topic: {topic}")
-    print(f"[Consumer] BDA :  {bda_config_path}")
-    print(f"[Consumer] Grid:  {grid_config_path}")
+    print(f"[Consumer] Decorr Factor: {decorr_factor}")
     print("=" * 80)
     
     spark = create_spark_session()
@@ -358,6 +358,8 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
                 
                 bda_config = load_bda_config(bda_config_path)
                 grid_config = load_grid_config(grid_config_path)
+
+                bda_config["decorr_factor"] = decorr_factor
 
             processing_time[epoch_id] = { 
                 "start": time.time(), 
@@ -411,7 +413,7 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
 
         # Generate final image
         processing_time["image_generation"] = { "start": time.time() }
-        consolidate_processing(grid, num_partitions, grid_config, slurm_job_id)
+        consolidate_processing(grid, num_partitions, grid_config, run_id)
         processing_time["image_generation"]["end"] = time.time()
 
         processing_time["end"] = time.time()
@@ -423,7 +425,7 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
 
         # Generate metrics
         if bda_config["decorr_factor"] < 1.0:
-            generate_metrics(windowed, averaged, num_partitions, bda_config, slurm_job_id)
+            generate_metrics(windowed, averaged, num_partitions, bda_config, run_id)
 
         print("[Consumer] Consumer finished processing")
 
@@ -447,15 +449,21 @@ def main():
     )
     
     parser.add_argument(
-        "--bootstrap-server", 
-        required=True,
-        help="Kafka bootstrap server address"
-    )
-    parser.add_argument(
         "--topic", 
         required=True,
-        help="Kafka topic to consume from"
+        help="Kafka topic to consume visibility data from."
     )
+    parser.add_argument(
+        "--bootstrap-server", 
+        required=True,
+        help="Kafka bootstrap server address."
+    )
+    parser.add_argument(
+        "--run-id",
+        required=True,
+        help="Unique identifier for this job"
+    )
+
     parser.add_argument(
         "--bda-config", 
         required=True,
@@ -467,20 +475,22 @@ def main():
         help="Path to grid configuration JSON file"
     )
     parser.add_argument(
-        "--slurm-job-id",
-        required=True,
-        help="Unique identifier for this job"
+        "--decorr-factor",
+        type=float,
+        default=0.95,
+        help="Decorrelation factor for BDA processing."
     )
 
     args = parser.parse_args()
     
     try:
         run_consumer(
-            bootstrap_server=args.bootstrap_server,
             topic=args.topic,
+            bootstrap_server=args.bootstrap_server,
+            run_id=args.run_id,
             bda_config_path=args.bda_config,
             grid_config_path=args.grid_config,
-            slurm_job_id=args.slurm_job_id,
+            decorr_factor=args.decorr_factor
         )
 
     except Exception as e:

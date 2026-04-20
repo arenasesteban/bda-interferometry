@@ -27,7 +27,7 @@ def load_bda_config(config_path):
             config = json.load(f)
         
         # Check presence of required scientific parameters
-        required_fields = ['decorr_factor', 'fov']
+        required_fields = ['fov']
         for field in required_fields:
             if field not in config:
                 raise ValueError(f"Missing required field '{field}' in BDA config")
