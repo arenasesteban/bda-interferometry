@@ -3,7 +3,7 @@ import numpy as np
 import astropy.units as u
 from unittest.mock import MagicMock, patch
 
-from src.data.simulation import (
+from data.simulation import (
     load_antenna_configuration,
     filter_antenna_configuration,
     configure_observation,

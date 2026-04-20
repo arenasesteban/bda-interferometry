@@ -1,7 +1,7 @@
 import math
 import numpy as np
 
-from src.bda.bda_core import (
+from core.bda.bda_core import (
     calculate_uv_distance,
     calculate_phase_difference, 
     sinc

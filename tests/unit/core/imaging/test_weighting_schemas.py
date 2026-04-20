@@ -4,7 +4,7 @@ from unittest.mock import patch, MagicMock
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
-from src.imaging.weighting_schemes import (
+from core.imaging.weighting_schemes import (
     natural_weighting,
     uniform_weighting,
     weight_visibilities,

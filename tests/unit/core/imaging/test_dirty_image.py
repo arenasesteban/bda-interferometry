@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock, call
 
-from src.imaging.dirty_image import (
+from core.imaging.dirty_image import (
     fft,
     save_dirty_image,
     save_psf_image,

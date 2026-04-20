@@ -5,7 +5,7 @@ import pytest
 import msgpack
 from unittest.mock import MagicMock, patch
 
-from src.data.extraction import (
+from data.extraction import (
     create_dask_client,
     rechunk_dataset,
     create_kafka_producer,

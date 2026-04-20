@@ -1,6 +1,6 @@
 import pytest
 
-from src.bda.bda_integration import apply_bda
+from core.bda.bda_integration import apply_bda
 
 required = {
     "subms_id", "field_id", "spw_id", "polarization_id",

@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 
 from pyspark.sql import DataFrame
 
-from src.imaging.gridding import (
+from core.imaging.gridding import (
     apply_gridding,
     prepare_gridding,
     accumulate_grid,

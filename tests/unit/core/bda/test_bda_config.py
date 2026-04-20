@@ -1,7 +1,7 @@
 import pytest
 import json
 
-from src.bda.bda_config import (
+from core.bda.bda_config import (
     load_bda_config,
     validate_bda_config
 )

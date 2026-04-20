@@ -2,7 +2,7 @@ import math
 import pytest
 import numpy as np
 
-from src.bda.bda_processor import (
+from core.bda.bda_processor import (
     process_rows,
     assign_temporal_window,
     assign_windows,
