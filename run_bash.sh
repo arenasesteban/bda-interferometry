@@ -1,11 +1,20 @@
 #!/bin/bash
+# ==============================================================================
+# BDA Interferometry — SLURM job script
+# Topología actual:
+#   - Nodo 1: Spark master + driver + Kafka + Zookeeper
+#   - Nodo 2..N: Spark workers (1 executor por worker)
+#
+# Parámetros sobreescribibles vía variables de entorno antes de sbatch:
+#   DECORR_FACTOR, FOV, KAFKA_PARTITIONS
+# ==============================================================================
 #SBATCH -J bda-interferometry
-#SBATCH -p debug
-#SBATCH --nodes=2
+#SBATCH -p largemem
+#SBATCH --nodes=3
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=20
-#SBATCH --mem=100G
-#SBATCH --time=00:30:00
+#SBATCH --mem=350G
+#SBATCH --time=06:00:00
 #SBATCH -o logs/bda-interferometry-%j.out
 #SBATCH -e logs/bda-interferometry-%j.err
 #SBATCH --mail-user=esteban.arenas.a@usach.cl
@@ -98,16 +107,42 @@ echo "==================================================="
 
 # ==============================================================================
 # RECURSOS SPARK
+# Topología objetivo:
+#   - Nodo master: Spark master + driver + Kafka + Zookeeper
+#   - Nodos worker: solo cómputo Spark
+# Regla de escalado:
+#   - 1 executor por worker
 # ==============================================================================
 TOTAL_MEM_MB="${SLURM_MEM_PER_NODE:-102400}"
+
+# Recursos anunciados por cada worker remoto
 SPARK_WORKER_CORES=$(( SLURM_CPUS_PER_TASK > 2 ? SLURM_CPUS_PER_TASK - 2 : 1 ))
 SPARK_WORKER_MEMORY="$(( TOTAL_MEM_MB * 85 / 100 ))m"
-SPARK_EXECUTOR_MEMORY="$(( TOTAL_MEM_MB * 85 * 90 / 10000 ))m"
+
+# Driver en el nodo master (client mode)
 SPARK_DRIVER_MEMORY_MB=$(( TOTAL_MEM_MB * 12 / 100 ))
 [ "$SPARK_DRIVER_MEMORY_MB" -ge 4096 ] || SPARK_DRIVER_MEMORY_MB=4096
 SPARK_DRIVER_MEMORY="${SPARK_DRIVER_MEMORY_MB}m"
-TOTAL_CORES=$(( N_WORKERS * SPARK_WORKER_CORES ))
+
+# 1 executor por worker remoto
+SPARK_EXECUTOR_CORES="$SPARK_WORKER_CORES"
+SPARK_EXECUTOR_MEMORY="$(( TOTAL_MEM_MB * 85 * 90 / 10000 ))m"
+
+# Solo los workers remotos aportan cómputo
+TOTAL_CORES=$(( N_WORKERS * SPARK_EXECUTOR_CORES ))
 SHUFFLE_PARTITIONS=$(( TOTAL_CORES * 2 > 8 ? TOTAL_CORES * 2 : 8 ))
+EXPECTED_EXECUTORS="$N_WORKERS"
+
+echo "---------------- Spark resources ------------------"
+echo "Driver memory         : $SPARK_DRIVER_MEMORY"
+echo "Worker cores          : $SPARK_WORKER_CORES"
+echo "Worker memory         : $SPARK_WORKER_MEMORY"
+echo "Executor cores        : $SPARK_EXECUTOR_CORES"
+echo "Executor memory       : $SPARK_EXECUTOR_MEMORY"
+echo "Expected executors    : $EXPECTED_EXECUTORS"
+echo "Total Spark cores max : $TOTAL_CORES"
+echo "Shuffle partitions    : $SHUFFLE_PARTITIONS"
+echo "---------------------------------------------------"
 
 # ==============================================================================
 # DIRECTORIOS
@@ -143,7 +178,7 @@ cleanup() {
     done
 
     pkill -f 'org.apache.spark.deploy.master.Master' 2>/dev/null || true
-    pkill -f 'kafka.Kafka'    2>/dev/null || true
+    pkill -f 'kafka.Kafka' 2>/dev/null || true
     pkill -f 'QuorumPeerMain' 2>/dev/null || true
 
     for worker in "${WORKER_NODES[@]}"; do
@@ -228,20 +263,21 @@ EOF
     WORKER_STEP_PIDS+=($!)
 done
 
+TOTAL_EXPECTED="$N_WORKERS"
 sleep 20
 REGISTERED=0
 for _ in {1..12}; do
     REGISTERED=$(curl -s "http://${MASTER_IP}:${SPARK_MASTER_WEBUI_PORT}/json/" \
         | "$PYSPARK_PYTHON" -c "import sys,json; print(len(json.load(sys.stdin).get('workers',[])))" \
         2>/dev/null || echo 0)
-    [ "$REGISTERED" -ge "$N_WORKERS" ] && break
+    [ "$REGISTERED" -ge "$TOTAL_EXPECTED" ] && break
     sleep 5
 done
 
-[ "$REGISTERED" -ge "$N_WORKERS" ] \
-    || { echo "[ERROR] $REGISTERED/$N_WORKERS workers registrados"; tail -n 40 "$LOG_DIR/spark-worker-${WORKER_NODES[0]}.log"; exit 1; }
+[ "$REGISTERED" -ge "$TOTAL_EXPECTED" ] \
+    || { echo "[ERROR] $REGISTERED/$TOTAL_EXPECTED workers registrados"; tail -n 40 "$LOG_DIR"/spark-worker-*.log; exit 1; }
 
-echo "  ✓ Spark workers OK ($REGISTERED/$N_WORKERS)"
+echo "  ✓ Spark workers OK ($REGISTERED/$TOTAL_EXPECTED remotos)"
 
 # ==============================================================================
 # 3) ZOOKEEPER
@@ -267,8 +303,6 @@ echo "  ✓ Zookeeper OK"
 # ==============================================================================
 echo "[4/6] Iniciando Kafka..."
 
-# Se genera un server.properties con los listeners correctos para este job,
-# derivado del server.properties base de la imagen.
 KAFKA_PROPS="$LOG_DIR/kafka-server.properties"
 singularity exec "$KAFKA_IMAGE" cat /etc/kafka/server.properties > "$KAFKA_PROPS"
 printf '\nlisteners=PLAINTEXT://0.0.0.0:9092\nadvertised.listeners=PLAINTEXT://%s:9092\n' "$MASTER_IP" >> "$KAFKA_PROPS"
@@ -315,10 +349,10 @@ echo "[5/6] Lanzando consumer..."
     --master "$SPARK_MASTER_URL" \
     --deploy-mode client \
     --driver-memory "$SPARK_DRIVER_MEMORY" \
-    --executor-cores "$SPARK_WORKER_CORES" \
+    --executor-cores "$SPARK_EXECUTOR_CORES" \
     --executor-memory "$SPARK_EXECUTOR_MEMORY" \
     --packages "$SPARK_KAFKA_PACKAGE" \
-    --conf "spark.executor.instances=$N_WORKERS" \
+    --conf "spark.executor.instances=$EXPECTED_EXECUTORS" \
     --conf "spark.cores.max=$TOTAL_CORES" \
     --conf "spark.sql.shuffle.partitions=$SHUFFLE_PARTITIONS" \
     --conf "spark.sql.adaptive.enabled=true" \
@@ -344,14 +378,12 @@ echo "[5/6] Lanzando consumer..."
         --bda-config       "$BDA_CONFIG" \
         --grid-config      "$GRID_CONFIG" \
         --slurm-job-id     "$SLURM_JOB_ID" \
-        --decorr-factor    "$DECORR_FACTOR" \
-        --fov              "$FOV" \
     > "$LOG_DIR/consumer.log" 2>&1 &
 CONSUMER_PID=$!
 
 sleep 12
 kill -0 "$CONSUMER_PID" 2>/dev/null \
-    || { echo "[ERROR] Consumer terminó prematuramente"; tail -n 40 "$LOG_DIR/consumer.log"; exit 1; }
+    || { echo "[ERROR] Consumer terminó prematuramente"; tail -n 80 "$LOG_DIR/consumer.log"; exit 1; }
 
 echo "  ✓ Consumer OK (PID $CONSUMER_PID)"
 
