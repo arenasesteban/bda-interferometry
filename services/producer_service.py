@@ -38,26 +38,19 @@ def load_simulation_config(config_path):
     return {}
 
 
-def update_bda_config(config_path, lambda_ref, max_diameter, threshold):
+def update_bda_config(config_path, lambda_ref, min_diameter, threshold):
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
-    
-        config["lambda_ref"] = lambda_ref
 
-        if config["fov_strategy"] == "DERIVED":
-            config["fov"] = float(0.55 * lambda_ref / (np.pi * max_diameter))
-        elif config["fov_strategy"] == "FIXED":
-            config["fov"] = config.get("fov", 0.0001)  # Keep the existing fixed value
-        else:
-            raise ValueError(f"Invalid fov_strategy. Supported strategies: {STRATEGY}")
+        fov = float(1.02 * lambda_ref / min_diameter)
+        theta_fov = fov / 2
+        theta_max = theta_fov * 0.01 # Set fov to 1% of the primary beam FOV
         
-        if config["threshold_strategy"] == "DERIVED":
-            config["threshold"] = float(threshold)
-        elif config["threshold_strategy"] == "FIXED":
-            config["threshold"] = config.get("threshold", 5000.0)  # Keep the existing fixed value
-        else:
-            raise ValueError(f"Invalid threshold_strategy. Supported strategies: {STRATEGY}")
+        config["lambda_ref"] = lambda_ref
+        config["fov"] = fov
+        config["theta_max"] = theta_max
+        config["threshold"] = lambda_ref / (theta_fov * 0.01) # Set threshold to 1% of the primary beam FOV
 
         with open(config_path, "w") as f:
             json.dump(config, f, indent=4)
@@ -76,9 +69,10 @@ def update_grid_config(config_path, theo_resolution, corrs_string, chan_freq):
         if config["cellsize_strategy"] == "DERIVED":
             config["cellsize"] = theo_resolution / 7
 
-        elif config["cellsize_strategy"] == "FIXED" and config.get("cellsize_flag", True):
-            config["cellsize"] = (config["cellsize"] * u.arcsec).to(u.rad).value
-            config["cellsize_flag"] = False
+        elif config["cellsize_strategy"] == "FIXED":
+            if config["cellsize_flag"] == True:
+                config["cellsize"] = (config["cellsize"] * u.arcsec).to(u.rad).value
+                config["cellsize_flag"] = False
         else:
             raise ValueError(f"Invalid cellsize_strategy. Supported strategies: {STRATEGY}")
 
@@ -104,7 +98,7 @@ def stream_kafka(dataset, topic):
             if subms is None or subms.visibilities is None:
                 continue
 
-            stream_dataset(subms.visibilities, subms, topic)
+            stream_dataset(subms.visibilities, subms, dataset.antenna, topic)
 
         print(f"[Producer] Finished streaming dataset to Kafka topic '{topic}'.")
     
@@ -128,7 +122,7 @@ def run_producer(antenna_config_path, simulation_config_path, topic):
         update_bda_config(
             config_path="./configs/bda_config.json",
             lambda_ref=dataset.spws.lambda_ref,
-            max_diameter=interferometer.antenna_array.get_array_extent()[1].compute(),
+            min_diameter=dataset.antenna.min_diameter,
             threshold=interferometer.antenna_array.get_median_antenna_separation().compute()
         )
         print("✓ BDA configuration updated.", flush=True)
