@@ -3,7 +3,9 @@ import numpy as np
 import io
 import traceback
 import dask
+import dask.array as da
 import msgpack
+
 
 from dask.distributed import Client, get_worker
 from kafka import KafkaProducer
@@ -26,7 +28,7 @@ def create_dask_client():
         client = Client(
             n_workers           = 1,
             threads_per_worker  = 4,
-            memory_limit        = "660GB",
+            memory_limit        = "350GB",
             processes           = True,
             local_directory     = tmp,
         )
@@ -42,7 +44,26 @@ def create_dask_client():
         raise
 
 
-def rechunk_dataset(dataset):
+def compute_baseline_length(antenna1_ids, antenna2_ids, antenna_positions):
+    try:
+        pos1 = antenna_positions[antenna1_ids]
+        pos2 = antenna_positions[antenna2_ids]
+
+        baseline_length = da.sqrt(
+            (pos1[:, 0] - pos2[:, 0]) ** 2 +
+            (pos1[:, 1] - pos2[:, 1]) ** 2 +
+            (pos1[:, 2] - pos2[:, 2]) ** 2
+        ).astype(np.float32)
+
+        return baseline_length
+
+    except Exception as e:
+        print(f"Error computing baseline length: {e}")
+        traceback.print_exc()
+        raise
+
+
+def rechunk_dataset(dataset, antennas):
     row_chunks = dataset.data.data.chunks[0]
 
     def rechunk_rows(x):
@@ -60,6 +81,12 @@ def rechunk_dataset(dataset):
         
         raise ValueError(f"Unsupported ndim={len(x.shape)} for array shape={x.shape}")
 
+    baseline_length = compute_baseline_length(
+        dataset.antenna1.data, 
+        dataset.antenna2.data, 
+        antennas.positions
+    )
+
     dataset_chunked = (
         rechunk_rows(dataset.antenna1.data),
         rechunk_rows(dataset.antenna2.data),
@@ -71,6 +98,7 @@ def rechunk_dataset(dataset):
         rechunk_rows(dataset.data.data),
         rechunk_rows(dataset.weight.data),
         rechunk_rows(dataset.flag.data),
+        rechunk_rows(baseline_length)
     )
 
     return dataset_chunked
@@ -125,7 +153,8 @@ def compute_chunk(chunk_delayed):
             uvw,
             visibility,
             weight,
-            flag
+            flag,
+            baseline_length
         ) = dask.compute(*chunk_delayed)
 
         u, v, w = uvw[:, 0], uvw[:, 1], uvw[:, 2]
@@ -134,7 +163,8 @@ def compute_chunk(chunk_delayed):
             antenna1, antenna2, scan_number,
             time, exposure, interval,
             u, v, w,
-            visibility, weight, flag
+            visibility, weight, flag,
+            baseline_length
         )
 
     except Exception as e:
@@ -168,6 +198,7 @@ def build_payload(data, start, end):
             "visibilities":     visibilities,
             "weights":          data[8][start:end],
             "flags":            flags,
+            "baseline_length":  data[10][start:end],
         }
 
         with io.BytesIO() as buffer:
@@ -254,7 +285,7 @@ def send_end_signal(producer, topic, n_blocks):
         raise
 
 
-def stream_dataset(dataset, subms, topic):
+def stream_dataset(dataset, subms, antennas, topic):
     producer = None
 
     try:
@@ -269,7 +300,7 @@ def stream_dataset(dataset, subms, topic):
             "n_correlations":   dataset.data.shape[2],
         }
 
-        arrays = dask.compute(*rechunk_dataset(dataset))
+        arrays = dask.compute(*rechunk_dataset(dataset, antennas))
 
         nrows = dataset.nrows
         chunks = dataset.data.data.chunks[0]

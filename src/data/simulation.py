@@ -50,6 +50,7 @@ def filter_antenna_configuration(interferometer, array_type, assembly):
         if assembly != "AA4":
             array_ids = get_ska_station_list(array_type, assembly)
             interferometer.antenna_array.filter_by_ids(array_ids, inplace=True)
+            interferometer.antenna_array.filter_by_ids(["SKA008"], exclude=True, inplace=True)
     
     except Exception as e:
         print(f"Error in filter_antenna_configuration: {e}")
