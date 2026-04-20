@@ -3,29 +3,12 @@ import traceback
 import pandas as pd
 
 from pyspark.sql.types import StructType, StructField, DoubleType, ArrayType, IntegerType, StringType
-from pyspark.sql.functions import pandas_udf, PandasUDFType, col
+from pyspark.sql.functions import pandas_udf, PandasUDFType
 
-from .bda_core import calculate_phase_difference, calculate_uv_distance, sinc
+from .bda_core import calculate_phase_difference, calculate_uv_distance, sinc, max_samples_per_window
 
 
-def assign_temporal_window(df, decorr_factor, fov, lambda_ref):
-    """
-    Assign temporal windows based on accumulated x value.
-
-    Parameters
-    ----------
-    df : pyspark.sql.DataFrame
-        Input DataFrame with necessary columns.
-    decorr_factor : float
-        Decorrelation factor threshold.
-    fov : float
-        Field of view parameter.
-
-    Returns
-    -------
-    pyspark.sql.DataFrame
-        DataFrame with assigned window IDs and accumulated x values.
-    """
+def assign_temporal_window(df, decorr_factor, theta_max, lambda_ref, baseline_ref):
     try:    
         schema = StructType(df.schema.fields + [
             StructField('window_id', IntegerType(), True),
@@ -47,8 +30,12 @@ def assign_temporal_window(df, decorr_factor, fov, lambda_ref):
             current_window = 1
             window_ids[0] = current_window
 
+            max_samples_window = max_samples_per_window(pdf['baseline_length'].iloc[0], baseline_ref)
+
             u_ref = pdf.loc[0, 'u']
             v_ref = pdf.loc[0, 'v']
+
+            samples_in_window = 1
 
             d_uv_arr[0] = np.nan
             phi_dot_arr[0] = np.nan
@@ -59,20 +46,23 @@ def assign_temporal_window(df, decorr_factor, fov, lambda_ref):
                 v = pdf.loc[i, 'v']
 
                 d_uv = calculate_uv_distance(u, v, u_ref, v_ref, lambda_ref)
-                x_inc = calculate_phase_difference(d_uv, fov)
+                x_inc = calculate_phase_difference(d_uv, theta_max)
                 
                 # Calculate decorrelation term
                 # sinc(ΔΦ/2)
                 sinc_val = sinc(x_inc / 2.0)
 
                 # Window assignment based on decorrelation factor
-                if sinc_val >= decorr_factor:
+                if sinc_val >= decorr_factor and samples_in_window < max_samples_window:
                     window_ids[i] = current_window
+                    samples_in_window += 1
+
                 else:
                     current_window += 1
                     window_ids[i] = current_window
 
                     u_ref, v_ref = u, v
+                    samples_in_window = 1
 
                 d_uv_arr[i] = d_uv
                 phi_dot_arr[i] = x_inc
@@ -131,10 +121,13 @@ def average_by_window(df):
 
             StructField('u', DoubleType(), True),
             StructField('v', DoubleType(), True),
+            StructField('w', DoubleType(), True),
             
             StructField('visibility', ArrayType(ArrayType(ArrayType(DoubleType()))), True),
             StructField('weight', (ArrayType(ArrayType(DoubleType()))), True),
-            StructField('flag', ArrayType(ArrayType(IntegerType())), True)
+            StructField('flag', ArrayType(ArrayType(IntegerType())), True),
+
+            StructField('baseline_length', DoubleType(), True),
         ])
 
         @pandas_udf(schema, PandasUDFType.GROUPED_MAP)
@@ -155,10 +148,12 @@ def average_by_window(df):
                     'time': pdf['time'].iloc[0],
                     'interval': pdf['interval'].sum(),
                     'exposure': pdf['exposure'].sum(),
+                    'baseline_length': pdf['baseline_length'].iloc[0],
                 }
 
                 bda_avg['u'] = (pdf['u'] * pdf['exposure']).sum() / bda_avg['exposure']
                 bda_avg['v'] = (pdf['v'] * pdf['exposure']).sum() / bda_avg['exposure']
+                bda_avg['w'] = (pdf['w'] * pdf['exposure']).sum() / bda_avg['exposure']
 
                 n = len(pdf)
                 vs_list, ws_list, fs_list = [], [], []
@@ -236,12 +231,12 @@ def process_rows(df_scientific, bda_config):
         Processed DataFrames after applying BDA.
     """
     try:
-        decorr_factor = bda_config.get('decorr_factor', 0.95)
-        lambda_ref = bda_config.get('lambda_ref', 0.1)
-        fov = bda_config.get('fov', 0.01)
+        decorr_factor = bda_config["decorr_factor"]
+        lambda_ref = bda_config["lambda_ref"]
+        theta_max = bda_config["theta_max"]
+        baseline_ref = bda_config["threshold"]
 
-        df_windowed = assign_temporal_window(df_scientific, decorr_factor, fov, lambda_ref)
-        
+        df_windowed = assign_temporal_window(df_scientific, decorr_factor, theta_max, lambda_ref, baseline_ref)
         df_averaged = average_by_window(df_windowed)
 
         return df_averaged, df_windowed

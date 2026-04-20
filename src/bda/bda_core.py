@@ -85,3 +85,19 @@ def sinc(x):
         print(f"Error calculating sinc function: {e}")
         traceback.print_exc()
         raise
+
+
+def max_samples_per_window(baseline_length, baseline_ref, samples_ref=8, min_samples=1, max_samples=16):
+    try:
+        if baseline_length is None or math.isnan(baseline_length) or baseline_length <= 0:
+            return min_samples
+
+        scaling = baseline_ref / baseline_length
+        raw_samples = math.floor(samples_ref * scaling)
+
+        return max(min_samples, min(raw_samples, max_samples))
+
+    except Exception as e:
+        print(f"Error computing continuous max samples: {e}")
+        traceback.print_exc()
+        raise
