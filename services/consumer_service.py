@@ -99,7 +99,9 @@ def define_visibility_schema():
 
         StructField("visibility",       ArrayType(ArrayType(ArrayType(DoubleType()))),  False),
         StructField("weight",           ArrayType(ArrayType(DoubleType())),             False),
-        StructField("flag",             ArrayType(ArrayType(IntegerType())),            False)
+        StructField("flag",             ArrayType(ArrayType(IntegerType())),            False),
+    
+        StructField("baseline_length",  DoubleType(),   False)
     ])
 
 
@@ -169,7 +171,9 @@ def assemble_block(metadata, arrays):
     
         "visibilities":     np.asarray(arrays["visibilities"]),
         "weights":          np.asarray(arrays["weights"]),
-        "flags":            np.asarray(arrays["flags"])
+        "flags":            np.asarray(arrays["flags"]),
+
+        "baseline_length":  np.asarray(arrays["baseline_length"])
     }
 
     return block
@@ -208,7 +212,9 @@ def process_rows(block):
 
             "visibility":       block["visibilities"][i].tolist(),
             "weight":           block["weights"][i].tolist(),
-            "flag":             block["flags"][i].tolist()
+            "flag":             block["flags"][i].tolist(),
+
+            "baseline_length":  float(block["baseline_length"][i])
         }
 
         rows.append(row)
@@ -248,6 +254,7 @@ def process_streaming_batch(df_scientific, num_partitions, epoch_id, bda_config,
         df_averaged, df_windowed = None, None
 
         if bda_config["decorr_factor"] < 1.0:
+            print(f"[Batch {epoch_id}] decorr_factor = {bda_config['decorr_factor']}, theta_max = {bda_config['theta_max']}")
             # BDA processing
             df_averaged, df_windowed = apply_bda(df_scientific, num_partitions, bda_config)
             print(f"[Batch {epoch_id}] ✓ BDA applied")
@@ -323,7 +330,7 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
     print("=" * 80)
     
     spark = create_spark_session()
-    num_partitions = spark.sparkContext.defaultParallelism * 4 # 8 cores = 32 partitions
+    num_partitions = spark.sparkContext.defaultParallelism * 4
 
     print(f"[Consumer] ✓ Spark session created with {spark.sparkContext.defaultParallelism} cores and {num_partitions} partitions")
 
@@ -338,7 +345,8 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
         processing_time = {}
         bda_config, grid_config = None, None
 
-        def process_batch(df_scientific, epoch_id):    
+        def process_batch(df_scientific, epoch_id):
+            nonlocal processing_time, bda_config, grid_config
             df_filtered, stream_ended = check_end_signal(df_scientific, epoch_id)
 
             if df_filtered.isEmpty():
@@ -351,8 +359,11 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
                 bda_config = load_bda_config(bda_config_path)
                 grid_config = load_grid_config(grid_config_path)
 
-            processing_time[epoch_id] = { "start": time.time() }
-
+            processing_time[epoch_id] = { 
+                "start": time.time(), 
+                "n_rows": df_filtered.count()
+            }
+            
             deserialized_rdd = df_filtered.rdd.mapPartitions(process_message)
             deserialized_df = spark.createDataFrame(deserialized_rdd, visibility_schema)
 
@@ -365,8 +376,9 @@ def run_consumer(bootstrap_server, topic, bda_config_path, grid_config_path, slu
 
                 processing_time[epoch_id]["end"] = time.time()
 
+                print(f"[Batch {epoch_id}] Rows processed: {processing_time[epoch_id]['n_rows']}")
                 print(f"[Batch {epoch_id}] ✓ Completed successfully in {processing_time[epoch_id]['end'] - processing_time[epoch_id]['start']:.1f} seconds")
-            
+
             else:
                 print(f"[Batch {epoch_id}] ✗ No output generated")
 
