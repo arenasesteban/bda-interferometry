@@ -63,7 +63,7 @@ def weight_visibilities(df_gridded, weight_scheme):
 
 def apply_weighting(df_gridded, grid_config):
     try:
-        weight_scheme = grid_config.get("weight_scheme", "NATURAL")
+        weight_scheme = grid_config["weight_scheme"]
         
         print(f"[Weighting] Applying {weight_scheme} weighting scheme...")
         df_weighted = weight_visibilities(df_gridded, weight_scheme)

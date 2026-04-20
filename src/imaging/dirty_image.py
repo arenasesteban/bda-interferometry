@@ -28,23 +28,19 @@ def fft(grids, weights, grid_config, type="dirty"):
 
 
 def save_dirty_image(dirty_image, output_file):
-    plt.figure(figsize=(8, 8))
-    plt.imshow(dirty_image, cmap="cmc.acton", origin="lower")
-    plt.title("Dirty Image", fontdict={"fontsize": 16, "fontweight": "bold"})
-    plt.xlabel("X [pixels]")
-    plt.ylabel("Y [pixels]")
-    plt.savefig(output_file)
+    plt.imshow(dirty_image, cmap="cmc.acton", origin="lower",)
+    plt.colorbar()
+    plt.savefig(output_file, dpi=100)
     plt.close()
 
 
 def save_psf_image(psf_image, output_file):
-    plt.figure(figsize=(8, 8))
-    plt.imshow(psf_image, cmap="cmc.acton", origin="lower")
-    plt.colorbar(label="Intensity")
-    plt.title("Point Spread Function (PSF)", fontdict={"fontsize": 16, "fontweight": "bold"})
-    plt.xlabel("X [pixels]")
-    plt.ylabel("Y [pixels]")
-    plt.savefig(output_file)
+    plt.imshow(psf_image, cmap="cmc.acton", origin="lower", vmax=0.3)
+    plt.xticks([], [])
+    plt.yticks([], [])
+    plt.colorbar()
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=100)
     plt.close()
 
 
