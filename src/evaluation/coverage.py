@@ -1,4 +1,6 @@
 import traceback
+import csv
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -40,6 +42,15 @@ def calculate_coverage_uv(df_scientific, df_averaging, output_coverage):
 
         print(f"[Evaluation] Length of scientific UV:  ({len(u_scientific), len(v_scientific)})")
         print(f"[Evaluation] Length of averaging UV:   ({len(u_averaging), len(v_averaging)})")
+
+        output_coordinates_csv = os.path.splitext(output_coverage)[0] + '_coordinates.csv'
+        with open(output_coordinates_csv, mode='w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['dataset', 'u_km', 'v_km'])
+            writer.writerows(zip(['scientific'] * len(u_scientific), u_scientific, v_scientific))
+            writer.writerows(zip(['averaged'] * len(u_averaging), u_averaging, v_averaging))
+
+        print(f"[Evaluation] Coordinates exported to: {output_coordinates_csv}")
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
         
@@ -83,6 +94,32 @@ def calculate_coverage_uv(df_scientific, df_averaging, output_coverage):
         plt.tight_layout()
         
         plt.savefig(output_coverage.replace('.png', '_overlay.png'), dpi=150, bbox_inches='tight')
+        plt.close(fig)
+
+        # Zoom view: dynamic center region based on percentiles
+        fig, ax = plt.subplots(figsize=(8, 8))
+        
+        ax.scatter(u_scientific, v_scientific, c='#1f77b4', s=0.5, alpha=0.3, label='Original')
+        ax.scatter(-u_scientific, -v_scientific, c='#1f77b4', s=0.5, alpha=0.3)
+        
+        ax.scatter(u_averaging, v_averaging, c='#ff7f0e', s=0.5, alpha=0.5, label='BDA')
+        ax.scatter(-u_averaging, -v_averaging, c='#ff7f0e', s=0.5, alpha=0.5)
+        
+        u_min, u_max = np.percentile(np.concatenate([u_averaging, -u_averaging]), [25, 75])
+        v_min, v_max = np.percentile(np.concatenate([v_averaging, -v_averaging]), [25, 75])
+        
+        ax.set_xlim(u_min, u_max)
+        ax.set_ylim(v_min, v_max)
+        ax.set_xlabel('u (km)')
+        ax.set_ylabel('v (km)')
+        ax.set_title('BDA - Zoom Center Region')
+        ax.grid(True, alpha=0.2)
+        ax.set_aspect('equal')
+        ax.legend(loc='upper right', markerscale=5)
+        
+        plt.tight_layout()
+        
+        plt.savefig(output_coverage.replace('.png', '_zoom.png'), dpi=150, bbox_inches='tight')
         plt.close(fig)
 
         plt.close('all')

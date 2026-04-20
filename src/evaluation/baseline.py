@@ -1,55 +1,209 @@
 import traceback
 import pyspark.sql.functions as F
+from pyspark.sql.window import Window
 
 
+# ------------------------------------------------------------
+# 1. Compute compression per baseline
+# ------------------------------------------------------------
 def calculate_baseline_dependency(df_scientific, df_averaging):
     """
-    Calculate compression ratio per baseline using the physical baseline length.
+    Compute compression ratio per baseline.
 
-    Assumptions
-    -----------
-    - u, v, w are in meters.
-    - baseline length is computed as sqrt(u^2 + v^2 + w^2).
-    - baseline_key identifies the antenna pair.
+    Output columns
+    --------------
+    baseline_key
+    baseline_length
+    n_before
+    n_after
+    compression_ratio
+    reduction_fraction
+    reduction_percent
     """
+
     try:
         df_before = (
             df_scientific
-            .withColumn(
-                'baseline_length',
-                F.sqrt(
-                    F.col('u') ** 2 +
-                    F.col('v') ** 2 +
-                    F.col('w') ** 2
-                )
-            )
-            .groupBy('baseline_key')
+            .groupBy("baseline_key")
             .agg(
-                F.avg('baseline_length').alias('baseline_length'),
-                F.count('*').alias('n_before')
+                F.avg("baseline_length").alias("baseline_length"),
+                F.count("*").alias("n_before")
             )
         )
 
         df_after = (
             df_averaging
-            .groupBy('baseline_key')
-            .agg(F.count('*').alias('n_after'))
+            .groupBy("baseline_key")
+            .agg(
+                F.count("*").alias("n_after")
+            )
         )
 
-        df_baseline_dependency = (
+        df_baseline = (
             df_before
-            .join(df_after, 'baseline_key', 'left')
-            .fillna(1, subset=['n_after'])
-            .withColumn('compression_ratio', F.col('n_before') / F.col('n_after'))
-            .orderBy('baseline_length')
+            .join(df_after, "baseline_key", "left")
+            .withColumn("n_after", F.coalesce(F.col("n_after"), F.lit(1)))  # fallback analítico
+            .withColumn(
+                "compression_ratio",
+                F.col("n_before").cast("double") / F.col("n_after").cast("double")
+            )
+            .withColumn(
+                "reduction_fraction",
+                (F.col("n_before").cast("double") - F.col("n_after").cast("double"))
+                / F.col("n_before").cast("double")
+            )
+            .withColumn(
+                "reduction_percent",
+                F.col("reduction_fraction") * F.lit(100.0)
+            )
+            .orderBy("baseline_length", "baseline_key")
         )
 
-        return df_baseline_dependency
+        return df_baseline
 
     except Exception as e:
         print(f"Error calculating baseline dependency: {e}")
         traceback.print_exc()
         raise
+
+
+# ------------------------------------------------------------
+# 3. Assign baseline quartiles
+# ------------------------------------------------------------
+def add_baseline_quartiles(df):
+
+    try:
+        window = Window.orderBy(F.col("baseline_length"), F.col("baseline_key"))
+
+        df = (
+            df
+            .withColumn("baseline_quartile", F.ntile(4).over(window))
+            .orderBy("baseline_quartile", "baseline_length", "baseline_key")
+        )
+
+        return df
+
+    except Exception as e:
+        print(f"Error assigning baseline quartiles: {e}")
+        traceback.print_exc()
+        raise
+
+
+# ------------------------------------------------------------
+# 4. Compute statistics per quartile
+# ------------------------------------------------------------
+def compute_quartile_stats(df):
+
+    try:
+        df_stats = (
+            df
+            .groupBy("baseline_quartile")
+            .agg(
+                F.count("*").alias("n_baselines"),
+
+                F.mean("baseline_length").alias("mean_baseline_length"),
+                F.min("baseline_length").alias("min_baseline_length"),
+                F.max("baseline_length").alias("max_baseline_length"),
+
+                F.mean("compression_ratio").alias("mean_compression_ratio"),
+                F.percentile_approx("compression_ratio", 0.5).alias("median_compression_ratio"),
+                F.stddev("compression_ratio").alias("std_compression_ratio"),
+
+                F.mean("reduction_fraction").alias("mean_reduction_fraction"),
+                F.mean("reduction_percent").alias("mean_reduction_percent"),
+                F.percentile_approx("reduction_percent", 0.5).alias("median_reduction_percent"),
+
+                F.sum("n_before").alias("rows_before"),
+                F.sum("n_after").alias("rows_after")
+            )
+            .withColumn(
+                "aggregated_ratio",
+                F.when(F.col("rows_after") > 0,
+                       F.col("rows_before").cast("double") / F.col("rows_after").cast("double"))
+                 .otherwise(F.lit(None).cast("double"))
+            )
+            .orderBy("baseline_quartile")
+        )
+
+        return df_stats
+
+    except Exception as e:
+        print(f"Error computing quartile stats: {e}")
+        traceback.print_exc()
+        raise
+
+
+# ------------------------------------------------------------
+# 5. Export CSV safely from Spark
+# ------------------------------------------------------------
+def export_baseline_csv(df_baseline, df_quartiles, output):
+
+    try:
+        (
+            df_baseline
+            .coalesce(1)
+            .write
+            .mode("overwrite")
+            .option("header", True)
+            .csv(f"{output}/baseline_dependency")
+        )
+
+        (
+            df_quartiles
+            .coalesce(1)
+            .write
+            .mode("overwrite")
+            .option("header", True)
+            .csv(f"{output}/baseline_quartiles")
+        )
+
+        print(f"[Export] CSV written to prefix: {output}")
+
+    except Exception as e:
+        print(f"Error exporting CSV: {e}")
+        traceback.print_exc()
+        raise
+
+
+# ------------------------------------------------------------
+# 6. Main evaluation pipeline
+# ------------------------------------------------------------
+def evaluate_baseline_dependency(
+    df_scientific,
+    df_averaging,
+    output, 
+    bda_config,
+    output_file
+):
+
+    try:
+        print("\n[Step 1] Computing baseline compression")
+        df_baseline = calculate_baseline_dependency(df_scientific, df_averaging)
+
+        print("\n[Step 2] Assigning baseline quartiles")
+        df_baseline = add_baseline_quartiles(df_baseline).cache()
+
+        print("\n[Step 3] Computing quartile statistics")
+        df_quartiles = compute_quartile_stats(df_baseline)
+
+        print("\n[Step 4] Exporting CSV")
+        export_baseline_csv(df_baseline, df_quartiles, output)
+
+        print("\nBaseline dependency per baseline:")
+        df_baseline.show(20, False)
+
+        print("\nBaseline dependency per quartile:")
+        df_quartiles.show(20, False)
+
+        validate_baseline_dependency(df_scientific, df_averaging, bda_config, output_file)
+
+        return df_baseline, df_quartiles
+
+    except Exception as e:
+        print(f"Error evaluating baseline dependency: {e}")
+        traceback.print_exc()
+        raise
+
 
 
 def group_stats(df):
@@ -105,7 +259,7 @@ def validate_baseline_dependency(df_scientific, df_averaging, bda_config, output
     ---------------
     bda_config['threshold']      : baseline threshold in meters
     bda_config['decorr_factor']  : decorrelation factor
-    bda_config['fov']            : theta_max in radians
+    bda_config['theta_max']      : theta_max in radians
     """
     try:
         df_baseline_dependency = calculate_baseline_dependency(df_scientific, df_averaging)
@@ -118,7 +272,7 @@ def validate_baseline_dependency(df_scientific, df_averaging, bda_config, output
             )
 
         decorr_factor = bda_config.get('decorr_factor', 0.95)
-        fov = bda_config.get('fov', 10.0)
+        theta_max = bda_config.get('theta_max', 10.0)
 
         short_baselines = df_baseline_dependency.filter(F.col('baseline_length') < F.lit(threshold))
         long_baselines = df_baseline_dependency.filter(F.col('baseline_length') >= F.lit(threshold))
@@ -141,7 +295,7 @@ def validate_baseline_dependency(df_scientific, df_averaging, bda_config, output
         total_agg_ratio = total_before / total_after if total_after else float('inf')
 
         write_baseline_dependency_results(
-            threshold, decorr_factor, fov,
+            threshold, decorr_factor, theta_max,
             total_baselines, total_before, total_after, total_agg_ratio,
             short_n, short_before, short_after,
             short_agg_ratio, short_mean_ratio, short_median_ratio, short_std_ratio,
@@ -161,7 +315,7 @@ def validate_baseline_dependency(df_scientific, df_averaging, bda_config, output
 
 
 def write_baseline_dependency_results(
-    threshold, decorr_factor, fov,
+    threshold, decorr_factor, theta_max,
     total_baselines, total_before, total_after, total_agg_ratio,
     short_n, short_before, short_after,
     short_agg_ratio, short_mean_ratio, short_median_ratio, short_std_ratio,
@@ -175,7 +329,7 @@ def write_baseline_dependency_results(
     Notes
     -----
     - threshold is assumed to be given in meters.
-    - fov corresponds to theta_max in radians.
+    - theta_max corresponds to the maximum angle in radians.
     """
     try:
         with open(output_file, "a") as f:
@@ -188,7 +342,7 @@ def write_baseline_dependency_results(
             f.write("Parameters:\n")
             f.write(f"  Baseline threshold:     {threshold:.6f} m\n")
             f.write(f"  Decorrelation factor:   {decorr_factor}\n")
-            f.write(f"  Theta max:              {fov} rad\n")
+            f.write(f"  Theta max:              {theta_max} rad\n")
             f.write("\n")
             f.write("Global summary:\n")
             f.write(f"  Total baselines:        {total_baselines}\n")

@@ -2,7 +2,7 @@ import traceback
 
 from .amplitude import amplitude, calculate_amplitude_error
 from .rms import rms, calculate_rms_measure
-from .baseline import validate_baseline_dependency
+from .baseline import evaluate_baseline_dependency
 from .coverage import calculate_coverage_uv
 
 
@@ -23,8 +23,8 @@ def calculate_metrics(df_scientific, df_averaging, bda_config, slurm_job_id):
         calculate_rms_measure(df_rms, bda_config, output_metrics)
 
         print(f"[Evaluation] Validating baseline dependency")
-        validate_baseline_dependency(df_scientific, df_averaging, bda_config, output_metrics)
-
+        evaluate_baseline_dependency(df_scientific, df_averaging, f"./output/{slurm_job_id}", bda_config, output_metrics)
+    
         print(f"[Evaluation] Calculating UV coverage")
         calculate_coverage_uv(df_scientific, df_averaging, output_coverage)
 
@@ -40,7 +40,7 @@ def calculate_metrics(df_scientific, df_averaging, bda_config, slurm_job_id):
 
 def prepare_dataframes(df_scientific, df_averaging):
     try:
-        cols = ["baseline_key", "window_id", "u", "v", "w", "visibility", "flag"]
+        cols = ["baseline_key", "window_id", "u", "v", "w", "visibility", "flag", "baseline_length"]
         df_scientific = df_scientific.select(cols)
         df_averaging = df_averaging.select(cols)
 
