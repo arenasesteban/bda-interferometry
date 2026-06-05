@@ -6,3 +6,6 @@ output/
 __pycache__/
 .pytest_cache/
 .coverage
+.vscode/
+docs/
+notebooks/
