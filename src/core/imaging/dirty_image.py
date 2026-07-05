@@ -27,11 +27,45 @@ def fft(grids, weights, grid_config, type="dirty"):
     return image
 
 
-def save_dirty_image(dirty_image, output_file):
-    plt.imshow(dirty_image, cmap="cmc.acton", origin="lower",)
-    plt.colorbar()
-    plt.savefig(output_file, dpi=100)
-    plt.close()
+def save_dirty_image(dirty_image, output_file, pixel_scale_arcsec=None, unit="Jy/beam"):
+    dirty_image = np.asarray(dirty_image)
+    ny, nx = dirty_image.shape
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+
+    if pixel_scale_arcsec is None:
+        # Ejes en píxeles
+        im = ax.imshow(
+            dirty_image,
+            cmap="cmc.acton",
+            origin="lower",
+            aspect="equal"
+        )
+        ax.set_xlabel("X [pixels]")
+        ax.set_ylabel("Y [pixels]")
+
+    else:
+        # Ejes en coordenadas angulares
+        x_half = (nx * pixel_scale_arcsec) / 2
+        y_half = (ny * pixel_scale_arcsec) / 2
+        extent = [-x_half, x_half, -y_half, y_half]
+
+        im = ax.imshow(
+            dirty_image,
+            cmap="cmc.acton",
+            origin="lower",
+            extent=extent,
+            aspect="equal"
+        )
+        ax.set_xlabel(r"$\Delta \alpha$ [arcsec]")
+        ax.set_ylabel(r"$\Delta \delta$ [arcsec]")
+
+    cbar = fig.colorbar(im, ax=ax, pad=0.04)
+    cbar.set_label(f"Flux Density [{unit}]")
+
+    fig.tight_layout()
+    fig.savefig(output_file, dpi=100, bbox_inches="tight")
+    plt.close(fig)
 
 
 def save_psf_image(psf_image, output_file):
