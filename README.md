@@ -1,4 +1,4 @@
-# bda-interferometry
+# radio-astronomy-pipeline
 
 ## Instalación
 
@@ -12,8 +12,8 @@
 
 1. Clonar repositorio:
 ```bash
-git clone https://github.com/arenasesteban/bda-interferometry.git
-cd bda-interferometry
+git clone https://github.com/arenasesteban/radio-astronomy-pipeline.git
+cd radio-astronomy-pipeline
 ```
 
 2. Crear un entorno virtual:

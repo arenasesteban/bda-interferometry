@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH -J bda-interferometry
+#SBATCH -J radio-astronomy-pipeline
 #SBATCH -p largemem
 #SBATCH -n 1
 #SBATCH --cpus-per-task=20
 #SBATCH --mem=100G
 #SBATCH --time=03:00:00
-#SBATCH -o logs/bda-interferometry-%j.out
-#SBATCH -e logs/bda-interferometry-%j.err
+#SBATCH -o logs/radio-astronomy-pipeline-%j.out
+#SBATCH -e logs/radio-astronomy-pipeline-%j.err
 #SBATCH --mail-user=esteban.arenas.a@usach.cl
 #SBATCH --mail-type=ALL
 
@@ -23,10 +23,10 @@ ml singularityCE
 
 # Variables
 KAFKA_DIR=$HOME/kafka-hpc
-KAFKA_IMAGE=$HOME/bda-interferometry/kafka/cp-kafka_7.4.0.sif
-SERVICE_DIR="$HOME/bda-interferometry/services"
-LOG_DIR="$HOME/bda-interferometry/logs/${SLURM_JOB_ID}"
-OUTPUT_DIR="$HOME/bda-interferometry/output/${SLURM_JOB_ID}"
+KAFKA_IMAGE=$HOME/radio-astronomy-pipeline/kafka/cp-kafka_7.4.0.sif
+SERVICE_DIR="$HOME/radio-astronomy-pipeline/services"
+LOG_DIR="$HOME/radio-astronomy-pipeline/logs/${SLURM_JOB_ID}"
+OUTPUT_DIR="$HOME/radio-astronomy-pipeline/output/${SLURM_JOB_ID}"
 
 # Spark Configuration
 SPARK_MASTER="local[16]"                # Use 16 cores

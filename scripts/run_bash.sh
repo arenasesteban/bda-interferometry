@@ -8,15 +8,15 @@
 # Parámetros sobreescribibles vía variables de entorno antes de sbatch:
 #   DECORR_FACTOR, FOV, KAFKA_PARTITIONS
 # ==============================================================================
-#SBATCH -J bda-interferometry
+#SBATCH -J radio-astronomy-pipeline
 #SBATCH -p largemem
 #SBATCH --nodes=3
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=20
 #SBATCH --mem=350G
 #SBATCH --time=06:00:00
-#SBATCH -o logs/bda-interferometry-%j.out
-#SBATCH -e logs/bda-interferometry-%j.err
+#SBATCH -o logs/radio-astronomy-pipeline-%j.out
+#SBATCH -e logs/radio-astronomy-pipeline-%j.err
 #SBATCH --mail-user=esteban.arenas.a@usach.cl
 #SBATCH --mail-type=ALL
 
@@ -35,7 +35,7 @@ micromamba activate bda-env
 # ==============================================================================
 # PATHS
 # ==============================================================================
-PROJECT_ROOT="$HOME/bda-interferometry"
+PROJECT_ROOT="$HOME/radio-astronomy-pipeline"
 SERVICE_DIR="$PROJECT_ROOT/services"
 KAFKA_DIR="$HOME/kafka-hpc"
 KAFKA_IMAGE="$PROJECT_ROOT/kafka/cp-kafka_7.4.0.sif"
@@ -50,7 +50,7 @@ export PYTHONPATH="$PROJECT_ROOT:$SERVICE_DIR:${PYTHONPATH:-}"
 LOG_DIR="$PROJECT_ROOT/logs/$SLURM_JOB_ID"
 OUTPUT_DIR="$PROJECT_ROOT/output/$SLURM_JOB_ID"
 SPARK_EVENTS_DIR="$LOG_DIR/spark-events"
-SPARK_LOCAL_BASE="/tmp/$USER/bda-interferometry/$SLURM_JOB_ID"
+SPARK_LOCAL_BASE="/tmp/$USER/radio-astronomy-pipeline/$SLURM_JOB_ID"
 
 ANTENNA_CONFIG="$PROJECT_ROOT/antenna_configs/skamid.cfg"
 SIMULATION_CONFIG="$PROJECT_ROOT/configs/simulation/ska-mid-band-02.json"
