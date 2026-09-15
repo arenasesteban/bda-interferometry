@@ -497,25 +497,17 @@ Streaming checkpoints are generated under:
 
 ## 15. Configuration location inventory
 
-
-**Sección 15. Configuration location inventory**
-
-La sección debería quedar así:
-
-```markdown
-## 15. Configuration location inventory
-
 The authoritative tracked configuration files under `conf/` are:
 
-| Path | Category | Main parameters | Consumed by |
-| --- | --- | --- | --- |
-| `conf/antenna/alma.cfg` | Antenna | Observatory, coordinate system, antenna positions, diameters and identifiers | `src/data/simulation.py`, through the producer `--antenna-config` argument |
-| `conf/antenna/skamid.cfg` | Antenna | Observatory, coordinate system, antenna positions, diameters and identifiers | `src/data/simulation.py`, through the producer `--antenna-config` argument |
-| `conf/runtime/bda_config.json` | BDA and evaluation | `lambda_ref`, `fov`, `threshold`, `amplitude_tolerance`, `rms_tolerance` | `src/services/producer_service.py`, `src/services/consumer_service.py` and BDA/evaluation modules |
-| `conf/runtime/grid_config.json` | Imaging | `weight_scheme`, `img_size`, `padding_factor`, `cellsize`, `cellsize_strategy`, `cellsize_flag`, `corrs_string`, `chan_freq` | `src/services/producer_service.py`, `src/services/consumer_service.py` and imaging modules |
-| `conf/runtime/simulation/alma-band-01.json` | Simulation | Interferometer, frequency range, number of channels, observation time, declination, integration time and source parameters | `src/services/producer_service.py` and `src/data/simulation.py` |
-| `conf/runtime/simulation/ska-mid-band-02.json` | Simulation | Interferometer, array type, assembly, frequency range, number of channels, observation time, declination, integration time and source path | `src/services/producer_service.py` and `src/data/simulation.py` |
-| `conf/runtime/spark.json` | Spark, Kafka and streaming runtime | Spark application settings, master, partition settings, Kafka servers, topic, consumer group, trigger interval and checkpoint location | Tracked runtime configuration; no direct reference was found in the current Python code |
+| Path                                           | Category                           | Main parameters                                                                                                                            | Consumed by                                                                                       |
+| ---------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `conf/antenna/alma.cfg`                        | Antenna                            | Observatory, coordinate system, antenna positions, diameters and identifiers                                                               | `src/data/simulation.py`, through the producer `--antenna-config` argument                        |
+| `conf/antenna/skamid.cfg`                      | Antenna                            | Observatory, coordinate system, antenna positions, diameters and identifiers                                                               | `src/data/simulation.py`, through the producer `--antenna-config` argument                        |
+| `conf/runtime/bda_config.json`                 | BDA and evaluation                 | `lambda_ref`, `fov`, `threshold`, `amplitude_tolerance`, `rms_tolerance`                                                                   | `src/services/producer_service.py`, `src/services/consumer_service.py` and BDA/evaluation modules |
+| `conf/runtime/grid_config.json`                | Imaging                            | `weight_scheme`, `img_size`, `padding_factor`, `cellsize`, `cellsize_strategy`, `cellsize_flag`, `corrs_string`, `chan_freq`               | `src/services/producer_service.py`, `src/services/consumer_service.py` and imaging modules        |
+| `conf/runtime/simulation/alma-band-01.json`    | Simulation                         | Interferometer, frequency range, number of channels, observation time, declination, integration time and source parameters                 | `src/services/producer_service.py` and `src/data/simulation.py`                                   |
+| `conf/runtime/simulation/ska-mid-band-02.json` | Simulation                         | Interferometer, array type, assembly, frequency range, number of channels, observation time, declination, integration time and source path | `src/services/producer_service.py` and `src/data/simulation.py`                                   |
+| `conf/runtime/spark.json`                      | Spark, Kafka and streaming runtime | Spark application settings, master, partition settings, Kafka servers, topic, consumer group, trigger interval and checkpoint location     | Tracked runtime configuration; no direct reference was found in the current Python code           |
 
 The tracked configuration inventory was verified with:
 
@@ -523,7 +515,9 @@ The tracked configuration inventory was verified with:
 git ls-files conf | sort
 ```
 
-The inventory contains seven tracked files. conf/runtime/spark.json contains runtime settings, but the current Python implementation does not load this file directly; its values should therefore be treated as recorded configuration rather than confirmed active settings.
+The inventory contains seven tracked files.
+
+`conf/runtime/spark.json` contains runtime settings, but the current Python implementation does not load this file directly. Its values must therefore be treated as recorded configuration rather than confirmed active runtime settings.
 
 ---
 
